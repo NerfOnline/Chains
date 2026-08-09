@@ -21,7 +21,7 @@
 
 addon.name     = 'chains';
 addon.author   = 'Sippius, Ivaar, and NerfOnline';
-addon.version  = '0.84';
+addon.version  = '0.85-Pre-release';
 addon.desc     = 'Display current skillchain options.';
 
 require('common');
@@ -32,22 +32,12 @@ local settings = require('settings');
 
 local skills = require('skills');
 
---=============================================================================
--- Font scaling compatibility for Ashita 4.3 and 4.16+
--- 4.16+ provides SetWindowFontScale; 4.3 uses PushFont/PopFont
---=============================================================================
 local function ApplyFontScale(scale)
-    if imgui.SetWindowFontScale then
-        imgui.SetWindowFontScale(scale)
-    else
-        imgui.PushFont(imgui.GetFont(), imgui.GetFontSize() * scale)
-    end
+    imgui.PushFont(imgui.GetFont(), imgui.GetFontSize() * scale)
 end
 
 local function UnapplyFontScale()
-    if not imgui.SetWindowFontScale then
-        imgui.PopFont()
-    end
+    imgui.PopFont()
 end
 
 --=============================================================================
@@ -410,7 +400,7 @@ local function GetPetskills()
     local skillTable = T{};
     local pPlayer = AshitaCore:GetMemoryManager():GetPlayer();
 
-    for k,v in pairs(skills.playerPet) do
+    for k,v in pairs(skills[13]) do
         if v and pPlayer:HasAbility(k+512) then
             skillTable:append(v);
         end
@@ -447,7 +437,7 @@ function GetBluskills()
     local spellTable = T(ashita.memory.read_array((ptr + blu.offset[0]) + 0x04, 0x14));
 
     for _,v in pairs(spellTable) do
-        if skills[4][v+512] then
+        if skills[4] and skills[4][v+512] then
             skillTable:append(skills[4][v+512]);
         end
     end
@@ -510,7 +500,7 @@ local GetSkillchains = function(target)
 
     -- Create petskill table if it does not already exist
     -- Will update through incoming 0xAC packets
-    if T{ 'BST', 'SMN' }:contains(mainJob) and not actionTable.petskill then
+    if mainJob == 'SMN' and not actionTable.petskill then
             actionTable.petskill = GetPetskills();
     end
 
@@ -526,7 +516,7 @@ local GetSkillchains = function(target)
     end
 
     -- Add skill tables based on job and active buffs
-    if chains.settings.display.pet and mainJob:any('BST','SMN') and actionTable.petskill then
+    if chains.settings.display.pet and mainJob == 'SMN' and actionTable.petskill then
         actions = actions:extend(actionTable.petskill);
     elseif chains.settings.display.spell and enableBLU and actionTable.bluskill then
         actions = actions:extend(actionTable.bluskill);
@@ -627,6 +617,33 @@ local function isPetInAlliance(id)
     end
 
     return false
+end
+
+--=============================================================================
+-- Return true if an entity is an Automaton owned by an alliance PUP.
+-- Automaton weaponskills arrive as action Type 11 (same as BST pets), so owner
+-- job is used to allow PUP without reopening BST jug first-steps.
+---@param id number ServerId
+---@return boolean
+--=============================================================================
+local function isAllianceAutomaton(id)
+    local pParty = AshitaCore:GetMemoryManager():GetParty();
+    local pEntity = AshitaCore:GetMemoryManager():GetEntity();
+    local pResource = AshitaCore:GetResourceManager();
+
+    for i = 0, 17 do
+        if pParty:GetMemberIsActive(i) == 1 then
+            local playerIndex = pParty:GetMemberTargetIndex(i);
+            local petIndex = pEntity:GetPetTargetIndex(playerIndex);
+            if pEntity:GetServerId(petIndex) == id then
+                local mainJob = pParty:GetMemberMainJob(i);
+                local jobAbbr = pResource:GetString('jobs.names_abbr', mainJob);
+                return jobAbbr == 'PUP';
+            end
+        end
+    end
+
+    return false;
 end
 
 --=============================================================================
@@ -770,7 +787,7 @@ ashita.events.register('packet_in', 'packet_in_cb', function (e)
         [7] = 'Weapon Skill start',
         [8] = 'Casting start',
         [9] = 'Item start',
-        [11] = 'NPC TP finish',
+        [11] = 'NPC TP finish', -- also BST jug pets / PUP automaton WS
         [12] = 'Ranged attack start',
         [13] = 'Avatar TP finish',
         [14] = 'Job Ability DNC',
@@ -799,14 +816,26 @@ ashita.events.register('packet_in', 'packet_in_cb', function (e)
 
         -- Overload packet type for pet actions (?)
         -- Prevents Weapon Bash from matching as an actionSkill
+        -- Type 11 and pet damage messages remap to skills[13] for SMN pet skill IDs.
+        -- Automaton WS live in skills.pup separated from NPC skills[11].
         local category = PetMessageTypes:contains(targetAction.Message) and 13 or actionPacket.Type;
+        local skillId = bit.band(actionPacket.Id, 0xFFFF);
 
         -- capture valid action skill and added effect property if there is a match
-        local actionSkill = skills[category] and skills[category][bit.band(actionPacket.Id,0xFFFF)];
+        local actionSkill = skills[category] and skills[category][skillId];
+        -- Type 11: NPC skills[11] and then PUP automaton skills.pup (since they are separate tables)
+        if not actionSkill and actionPacket.Type == 11 then
+            actionSkill = (skills[11] and skills[11][skillId]) or (skills.pup and skills.pup[skillId]);
+        end
+        -- Type 14: SAM Konzen-ittai and DNC Wild Flourish
+        -- Also accept Type 6 as a defensive fallback for nonstandard JA packaging
+        if not actionSkill and T{ 6, 14 }:contains(actionPacket.Type) then
+            actionSkill = skills[14] and skills[14][skillId];
+        end
         local effectProperty = targetAction.AdditionalEffect and SkillPropNames[bit.band(targetAction.AdditionalEffect.Damage,0x3F)];
 
         --debug ===============================================================
-        if chains.debug and T{ 3, 6, 13, 14 }:contains(actionPacket.Type) then
+        if chains.debug and T{ 3, 6, 11, 13, 14 }:contains(actionPacket.Type) then
             local out = ('Type: %s -> %s, Id: %s'):fmt(actionPacket.Type, category, actionPacket.Id);
             if actionSkill then
                 out = out .. (' Skill: %s'):fmt(actionSkill.en);
@@ -855,9 +884,11 @@ ashita.events.register('packet_in', 'packet_in_cb', function (e)
         -- Check for valid actor skill with valid message - generic first step (excluding chainbound)
         -- Include spells when SCH Immanence or BLU Azure Lore / Chain Affinity is active
         -- Immanence and Chain Affinity buff status cleared on use
-        -- Only allow alliance players (includes Trusts) and SMN pets (Type 13); blocks BST pets (Type 11)
+        -- Allow alliance players (including Trusts), SMN pets (Type 13), and PUP automatons (Type 11);
+        -- Still blocks BST pets (Type 11) from opening a window
+        -- BST pets do not have skillchain attributes on Horizon
         elseif actionSkill and MessageTypes:contains(targetAction.Message)
-            and (isPlayerInAlliance(actor) or actionPacket.Type == 13)
+            and (isPlayerInAlliance(actor) or actionPacket.Type == 13 or isAllianceAutomaton(actor))
             and (actionPacket.Type ~= 4 or (playerTable[actor])) then
             local delay = actionSkill and actionSkill.delay or 3
             targetTable[target.Id] = {
@@ -905,7 +936,7 @@ ashita.events.register('packet_in', 'packet_in_cb', function (e)
             playerTable[playerID][effect] = nil;
         end
 
-    -- Character Abilities (Weaponskills and BST/SMN PetSkills)
+    -- Character Abilities (Weaponskills and SMN PetSkills)
     elseif e.id == 0x0AC then --and e.data:sub(5) ~= actionTable.lastAC then
         actionTable.wepskill = T{};
         actionTable.petskill = T{};
@@ -927,9 +958,9 @@ ashita.events.register('packet_in', 'packet_in_cb', function (e)
             end
         end
 
-        -- BST/SMN PetSkills - fix: skip if not BST or SMN?
+        -- SMN PetSkills
         data = e.data:sub(69);
-        for k,v in pairs(skills.playerPet) do
+        for k,v in pairs(skills[13]) do
             if math.floor((data:byte(math.floor(k/8)+1)%2^(k%8+1))/2^(k%8)) == 1 then
                 table.insert(actionTable.petskill, v);
             end
@@ -946,7 +977,7 @@ ashita.events.register('packet_in', 'packet_in_cb', function (e)
 
         --Iterate through bytes 8+1 through 27+1 - corresponds to the 20 BLU spell slots
         for x = 8+1, 27+1 do
-            local match = skills[4][e.data:byte(x)+512]
+            local match = skills[4] and skills[4][e.data:byte(x)+512]
             if match then
                 table.insert(actionTable.bluskill, match);
             end
