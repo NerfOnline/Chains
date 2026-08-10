@@ -21,7 +21,7 @@
 
 addon.name     = 'chains';
 addon.author   = 'Sippius, Ivaar, and NerfOnline';
-addon.version  = '0.85-Pre-release';
+addon.version  = '0.85a-Pre-release';
 addon.desc     = 'Display current skillchain options.';
 
 require('common');
@@ -29,7 +29,6 @@ local ffi = require('ffi');
 local chat = require('chat');
 local imgui = require('imgui');
 local settings = require('settings');
-
 local skills = require('skills');
 
 local function ApplyFontScale(scale)
@@ -47,6 +46,7 @@ local default_settings = T{
     position_x = 100,
     position_y = 100,
     font_scale = 1.0,
+    direction = 'top', -- 'top' (top-down) or 'bottom' (bottom-up)
     display = T{
         color = true,
         pet = true,
@@ -58,9 +58,9 @@ local default_settings = T{
 local chains = T{
     settings = settings.load(default_settings),
     visible = false,
+    previewTarget = nil,
     move = nil,
 
-    debug = false,
     forceAeonic = 0, -- set from 0 to 3
     forceImmanence = false, -- boolean
     forceAffinity = false, -- boolean
@@ -260,6 +260,10 @@ local SkillPropNames = T{
 settings.register('settings', 'settings_update', function (s)
     if (s ~= nil) then
         chains.settings = s;
+    end
+
+    if chains.settings.direction == nil then
+        chains.settings.direction = 'top';
     end
 
     settings.save();
@@ -476,52 +480,175 @@ local GetAeonicProperty = function(action, actor)
 end
 
 --=============================================================================
+-- Axe weaponskills used by /chains visible preview (excludes IDs 73-77)
+--=============================================================================
+local function GetAxePreviewSkills()
+    local skillTable = T{};
+    for id = 64, 72 do
+        if skills[3][id] then
+            skillTable:append(skills[3][id]);
+        end
+    end
+    return skillTable;
+end
+
+--=============================================================================
+-- Build a looping first-step target for Spinning Axe preview
+---@return table
+--=============================================================================
+local function CreateVisiblePreviewTarget()
+    local spinningAxe = skills[3][68];
+    local delay = spinningAxe.delay or 3;
+    return {
+        en = spinningAxe.en,
+        property = table.copy(spinningAxe.skillchain),
+        ts = os.time(),
+        dur = 7 + delay,
+        wait = delay,
+        step = 1,
+    };
+end
+
+--=============================================================================
+-- Draw a single line of text centered in the current window
+---@param text string
+--=============================================================================
+local function GetTextWidth(text)
+    local width = imgui.CalcTextSize(text);
+    if type(width) == 'table' then
+        return width[1] or width.x or 0;
+    end
+    return width or 0;
+end
+
+local function DrawCenteredText(text)
+    local textWidth = GetTextWidth(text);
+    local windowWidth = imgui.GetWindowWidth();
+    imgui.SetCursorPosX(math.max((windowWidth - textWidth) * 0.5, 0));
+    imgui.Text(text);
+end
+
+local function DrawPreviewChrome()
+    DrawCenteredText('--- Chains Live Preview ---');
+    DrawCenteredText('Click and Drag to Move Display');
+end
+
+--=============================================================================
+-- Measure the widest line for auto-fit window width
+---@param targetEntry table
+---@param skillchains table|nil
+---@param showChrome boolean
+---@return number
+--=============================================================================
+local function MeasureChainWidth(targetEntry, skillchains, showChrome)
+    local maxWidth = 0;
+
+    local function consider(text)
+        maxWidth = math.max(maxWidth, GetTextWidth(text));
+    end
+
+    if showChrome then
+        consider('--- Chains Live Preview ---');
+        consider('Click and Drag to Move Display');
+    end
+
+    consider('Wait  99');
+    consider('Go!   99');
+    consider('Burst 99');
+    consider(('Step: %d >> %s'):fmt(targetEntry.step, targetEntry.en));
+
+    if targetEntry.bound then
+        consider(('[Chainbound Lv.%d]'):fmt(targetEntry.bound));
+    else
+        local propWidth = GetTextWidth('[') + GetTextWidth(']');
+        for k, v in pairs(targetEntry.property) do
+            if k > 1 then
+                propWidth = propWidth + GetTextWidth(', ');
+            end
+            propWidth = propWidth + GetTextWidth(v);
+        end
+        if targetEntry.step > 1 and chainInfo[targetEntry.property[1]] then
+            propWidth = propWidth + GetTextWidth(' (') + GetTextWidth(')');
+            for k, v in pairs(chainInfo[targetEntry.property[1]].burst) do
+                if k > 1 then
+                    propWidth = propWidth + GetTextWidth(', ');
+                end
+                propWidth = propWidth + GetTextWidth(v);
+            end
+        end
+        maxWidth = math.max(maxWidth, propWidth);
+    end
+
+    if skillchains then
+        for _, v in pairs(skillchains) do
+            maxWidth = math.max(maxWidth, GetTextWidth(v.outText) + GetTextWidth(' ') + GetTextWidth(v.outProp));
+        end
+    end
+
+    local padding = 16;
+    local style = imgui.GetStyle();
+    if style and style.WindowPadding then
+        local padX = style.WindowPadding.x or style.WindowPadding[1];
+        if padX then
+            padding = padX * 2;
+        end
+    end
+
+    return maxWidth + padding;
+end
+
+--=============================================================================
 -- Return formatted table of valid skillchain options
----@param target number ServerID of target
+---@param target table Target skillchain state
+---@param actionsOverride? table Optional action list (visible preview)
 ---@return table chainTable Current skillchain options
 --=============================================================================
-local GetSkillchains = function(target)
+local GetSkillchains = function(target, actionsOverride)
     local actions = T{};
     local chainTable = T{};
     local levelTable = T{{},{},{},{}};
 
-    local mainJob = GetPlayer().MainJob;
-    local enableSCH = mainJob == 'SCH' and ((playerTable[playerID] and playerTable[playerID][statusID.IM]) or
-                                            chains.forceImmanence);
-    local enableBLU = mainJob == 'BLU' and ((playerTable[playerID] and playerTable[playerID][statusID.AL]) or
-                                            (playerTable[playerID] and playerTable[playerID][statusID.CA]) or
-                                            chains.forceAffinity);
+    if actionsOverride then
+        actions = actionsOverride;
+    else
+        local mainJob = GetPlayer().MainJob;
+        local enableSCH = mainJob == 'SCH' and ((playerTable[playerID] and playerTable[playerID][statusID.IM]) or
+                                                chains.forceImmanence);
+        local enableBLU = mainJob == 'BLU' and ((playerTable[playerID] and playerTable[playerID][statusID.AL]) or
+                                                (playerTable[playerID] and playerTable[playerID][statusID.CA]) or
+                                                chains.forceAffinity);
 
-    -- Create weaponskill table if it does not already exist
-    -- Will update through incoming 0xAC packets
-    if not actionTable.wepskill then
-        actionTable.wepskill = GetWeaponskills();
-    end
+        -- Create weaponskill table if it does not already exist
+        -- Will update through incoming 0xAC packets
+        if not actionTable.wepskill then
+            actionTable.wepskill = GetWeaponskills();
+        end
 
-    -- Create petskill table if it does not already exist
-    -- Will update through incoming 0xAC packets
-    if mainJob == 'SMN' and not actionTable.petskill then
-            actionTable.petskill = GetPetskills();
-    end
+        -- Create petskill table if it does not already exist
+        -- Will update through incoming 0xAC packets
+        if mainJob == 'SMN' and not actionTable.petskill then
+                actionTable.petskill = GetPetskills();
+        end
 
-    -- Create bluskill table if it does not already exist
-    -- Will update through incoming 0x44 packets
-    if mainJob == 'BLU' and not actionTable.bluskill then
-        actionTable.bluskill = GetBluskills();
-    end
+        -- Create bluskill table if it does not already exist
+        -- Will update through incoming 0x44 packets
+        if mainJob == 'BLU' and not actionTable.bluskill then
+            actionTable.bluskill = GetBluskills();
+        end
 
-    -- Initialize actions with weaponskills
-    if chains.settings.display.weapon then
-        actions = actions:extend(actionTable.wepskill);
-    end
+        -- Initialize actions with weaponskills
+        if chains.settings.display.weapon then
+            actions = actions:extend(actionTable.wepskill);
+        end
 
-    -- Add skill tables based on job and active buffs
-    if chains.settings.display.pet and mainJob == 'SMN' and actionTable.petskill then
-        actions = actions:extend(actionTable.petskill);
-    elseif chains.settings.display.spell and enableBLU and actionTable.bluskill then
-        actions = actions:extend(actionTable.bluskill);
-    elseif chains.settings.display.spell and enableSCH and actionTable.schskill then
-        actions = actions:extend(actionTable.schskill);
+        -- Add skill tables based on job and active buffs
+        if chains.settings.display.pet and mainJob == 'SMN' and actionTable.petskill then
+            actions = actions:extend(actionTable.petskill);
+        elseif chains.settings.display.spell and enableBLU and actionTable.bluskill then
+            actions = actions:extend(actionTable.bluskill);
+        elseif chains.settings.display.spell and enableSCH and actionTable.schskill then
+            actions = actions:extend(actionTable.schskill);
+        end
     end
 
     -- Search for valid skillchains and store into a table per skillchain level
@@ -568,6 +695,110 @@ local GetSkillchains = function(target)
     end
 
     return chainTable;
+end
+
+--=============================================================================
+-- Draw the skillchain panel body for a target entry
+---@param targetEntry table
+---@param skillchains table|nil Precomputed closers (optional)
+---@param showChrome boolean|nil Preview header/footer when visible
+--=============================================================================
+local function DrawChainContent(targetEntry, skillchains, showChrome)
+    local now = os.time();
+    local timediff = now - targetEntry.ts;
+    local timer = targetEntry.dur - timediff;
+    local bottomUp = chains.settings.direction == 'bottom';
+
+    if not targetEntry.closed then
+        skillchains = skillchains or GetSkillchains(targetEntry);
+    else
+        skillchains = skillchains or T{};
+    end
+
+    local function drawTimer()
+        if not targetEntry.closed then
+            if timediff < targetEntry.wait then
+                imgui.TextColored({ 1.0, 0.0, 0.0, 1.0 },('Wait  %d'):fmt(targetEntry.wait-timediff));
+            else
+                imgui.TextColored({ 0.0, 1.0, 0.0, 1.0 },('Go!   %d'):fmt(timer));
+            end
+        else
+            imgui.Text(('Burst %d'):fmt(timer));
+        end
+    end
+
+    local function drawStep()
+        imgui.Text(('Step: %d >> %s'):fmt(targetEntry.step, targetEntry.en));
+    end
+
+    local function drawElements()
+        imgui.Text('[');
+        imgui.SameLine();
+        if targetEntry.bound then
+            imgui.Text(('Chainbound Lv.%d'):fmt(targetEntry.bound));
+        else
+            for k,v in pairs(targetEntry.property) do
+                if k > 1 then
+                    imgui.SameLine(0,0);
+                    imgui.Text(',');
+                    imgui.SameLine();
+                end
+                imgui.TextColored(GetPropertyColor(v),v);
+            end
+        end
+        imgui.SameLine();
+        imgui.Text(']');
+        if targetEntry.step > 1 then
+            imgui.SameLine();
+            imgui.Text(' (');
+            imgui.SameLine();
+            for k,v in pairs(chainInfo[targetEntry.property[1]].burst) do
+                if k > 1 then
+                    imgui.SameLine(0,0);
+                    imgui.Text(',');
+                    imgui.SameLine();
+                end
+                imgui.TextColored(GetPropertyColor(v),v);
+            end
+            imgui.SameLine();
+            imgui.Text(')');
+        end
+    end
+
+    local function drawClosers()
+        if targetEntry.closed then
+            return;
+        end
+        for _,v in pairs(skillchains) do
+            imgui.Text(v.outText);
+            imgui.SameLine();
+            imgui.TextColored(GetPropertyColor(v.outProp), v.outProp);
+        end
+    end
+
+    if bottomUp then
+        if showChrome then
+            DrawPreviewChrome();
+            imgui.Separator();
+        end
+        drawClosers();
+        imgui.Separator();
+        drawElements();
+        drawStep();
+        imgui.Separator();
+        drawTimer();
+    else
+        drawTimer();
+        imgui.Separator();
+        drawStep();
+        drawElements();
+        imgui.Separator();
+        drawClosers();
+        if showChrome then
+            imgui.Separator();
+            DrawPreviewChrome();
+        end
+    end
 end
 
 --=============================================================================
@@ -834,26 +1065,6 @@ ashita.events.register('packet_in', 'packet_in_cb', function (e)
         end
         local effectProperty = targetAction.AdditionalEffect and SkillPropNames[bit.band(targetAction.AdditionalEffect.Damage,0x3F)];
 
-        --debug ===============================================================
-        if chains.debug and T{ 3, 6, 11, 13, 14 }:contains(actionPacket.Type) then
-            local out = ('Type: %s -> %s, Id: %s'):fmt(actionPacket.Type, category, actionPacket.Id);
-            if actionSkill then
-                out = out .. (' Skill: %s'):fmt(actionSkill.en);
-            end
-            print(chat.header('0x28'):append(chat.error(out)));
-            if targetAction then
-                out = ('Action Message: %s'):fmt(targetAction.Message);
-                if targetAction.AdditionalEffect then
-                    out = out .. (' Effect: %s'):fmt(targetAction.AdditionalEffect.Damage);
-                end
-                if effectProperty then
-                    out = out .. (' Property: %s'):fmt(effectProperty);
-                end
-            end
-            print(chat.header('0x28'):append(chat.error(out)));
-        end
-        --=====================================================================
-
         -- exit if actor is not in alliance
         if not (isPlayerInAlliance(actor) or isPetInAlliance(actor)) then
             return;
@@ -1020,7 +1231,30 @@ ashita.events.register('d3d_present', 'present_cb', function ()
     local targetId = AshitaCore:GetMemoryManager():GetTarget():GetServerId(0);
     local render = targetId ~= nil and targetTable[targetId] and targetTable[targetId].dur-(now-targetTable[targetId].ts) > 0;
 
+    -- Keep visible-mode preview looping while enabled
+    if chains.visible then
+        if not chains.previewTarget then
+            chains.previewTarget = CreateVisiblePreviewTarget();
+        elseif now - chains.previewTarget.ts > chains.previewTarget.dur then
+            chains.previewTarget.ts = now;
+        end
+    else
+        chains.previewTarget = nil;
+    end
+
     if render or chains.visible or chains.position then
+        local showChrome = false;
+        local targetEntry = nil;
+        local skillchains = nil;
+
+        if render then
+            targetEntry = targetTable[targetId];
+            skillchains = GetSkillchains(targetEntry);
+        elseif chains.visible and chains.previewTarget then
+            showChrome = true;
+            targetEntry = chains.previewTarget;
+            skillchains = GetSkillchains(targetEntry, GetAxePreviewSkills());
+        end
 
         local flags = bit.bor(
             ImGuiWindowFlags_NoDecoration,
@@ -1030,8 +1264,6 @@ ashita.events.register('d3d_present', 'present_cb', function ()
             ImGuiWindowFlags_NoNav)
 
         imgui.SetNextWindowBgAlpha(0.8)
-        imgui.SetNextWindowSize({ 350 * chains.settings.font_scale, -1 }, ImGuiCond_Always)
-        imgui.SetNextWindowSizeConstraints({ -1, -1 }, { FLT_MAX, FLT_MAX })
 
         if chains.position then
             imgui.SetNextWindowPos({ chains.position.x, chains.position.y }, ImGuiCond_Always, { 0, 0 });
@@ -1039,82 +1271,17 @@ ashita.events.register('d3d_present', 'present_cb', function ()
             imgui.SetNextWindowPos({ chains.settings.position_x, chains.settings.position_y }, ImGuiCond_Appearing, { 0, 0 });
         end
 
+        if targetEntry then
+            ApplyFontScale(chains.settings.font_scale);
+            local contentWidth = MeasureChainWidth(targetEntry, skillchains, showChrome);
+            imgui.SetNextWindowSizeConstraints({ contentWidth, -1 }, { FLT_MAX, FLT_MAX });
+        else
+            imgui.SetNextWindowSizeConstraints({ -1, -1 }, { FLT_MAX, FLT_MAX });
+        end
+
         if (imgui.Begin('chains', true, flags)) then
-
-            if render then
-                ApplyFontScale(chains.settings.font_scale)
-
-                local timediff = now-targetTable[targetId].ts;
-                local timer = targetTable[targetId].dur-timediff;
-
-                -- Timer
-                if not targetTable[targetId].closed then
-                    if timediff < targetTable[targetId].wait then
-                        imgui.TextColored({ 1.0, 0.0, 0.0, 1.0 },('Wait  %d'):fmt(targetTable[targetId].wait-timediff));
-                    else
-                        imgui.TextColored({ 0.0, 1.0, 0.0, 1.0 },('Go!   %d'):fmt(timer));
-                    end
-                else
-                    imgui.Text(('Burst %d'):fmt(timer));
-                end
-
-                -- Step, active properties and burst element
-                imgui.Separator();
-                imgui.Text(('Step: %d >> %s'):fmt(targetTable[targetId].step, targetTable[targetId].en));
-                imgui.Text('[');
-                imgui.SameLine();
-                if targetTable[targetId].bound then
-                    imgui.Text(('Chainbound Lv.%d'):fmt(targetTable[targetId].bound));
-                else
-                    for k,v in pairs(targetTable[targetId].property) do
-                        if k > 1 then
-                            imgui.SameLine(0,0);
-                            imgui.Text(',');
-                            imgui.SameLine();
-                        end
-                        imgui.TextColored(GetPropertyColor(v),v);
-                    end
-                end
-                imgui.SameLine();
-                imgui.Text(']');
-                if targetTable[targetId].step > 1 then
-                    imgui.SameLine();
-                    imgui.Text(' (');
-                    imgui.SameLine();
-                    for k,v in pairs(chainInfo[targetTable[targetId].property[1]].burst) do
-                        if k > 1 then
-                            imgui.SameLine(0,0);
-                            imgui.Text(',');
-                            imgui.SameLine();
-                        end
-                        imgui.TextColored(GetPropertyColor(v),v);
-                    end
-                    imgui.SameLine();
-                    imgui.Text(')');
-                end
-
-                -- Available skillchains
-                imgui.Separator();
-                if not targetTable[targetId].closed then
-                    local skillchains = GetSkillchains(targetTable[targetId]);
-                    -- Build skillchains list for target if it does not exist
-                    --if not targetTable[targetId].skillchains then
-                    --    targetTable[targetId].skillchains = skillchains;
-                    --end
-                    for _,v in pairs(skillchains) do
-                        imgui.Text(v.outText);
-                        imgui.SameLine();
-                        imgui.TextColored(GetPropertyColor(v.outProp), v.outProp);
-                    end
-                end
-                UnapplyFontScale()
-            elseif chains.visible then
-                ApplyFontScale(chains.settings.font_scale)
-                imgui.Text('');
-                imgui.Text('                 --- Chains ---                 ');
-                imgui.Text('         Click and drag to move display         ');
-                imgui.Text('');
-                UnapplyFontScale()
+            if targetEntry then
+                DrawChainContent(targetEntry, skillchains, showChrome);
             end
 
             if chains.position then
@@ -1125,6 +1292,10 @@ ashita.events.register('d3d_present', 'present_cb', function ()
             chains.settings.position_x, chains.settings.position_y = imgui.GetWindowPos();
         end
         imgui.End();
+
+        if targetEntry then
+            UnapplyFontScale();
+        end
     end
 
 end);
@@ -1151,11 +1322,27 @@ ashita.events.register('command', 'command_cb', function (e)
     e.blocked = true;
 
     --========================================================================
-    -- Debug
+    -- Help
     --========================================================================
-    if (#args == 2) and (args[2] == 'debug') then
-        chains.debug = not chains.debug;
-        print(chat.header(addon.name):append(chat.message('%s: %s'):fmt(args[2], chains.debug and 'on' or 'off')));
+    if (#args == 2) and args[2]:any('help', '?', 'commands') then
+        local commandHelp = T{
+            { '/chains color', 'Toggle colored skillchain properties.' },
+            { '/chains weapon', 'Toggle weaponskill display.' },
+            { '/chains pet', 'Toggle pet skill display.' },
+            { '/chains spell', 'Toggle spell display.' },
+            { '/chains visible', 'Show live preview and unlock the window for moving.' },
+            { '/chains direction', 'Toggle top-down or bottom-up layout direction.' },
+            { '/chains scale <n>', 'Set UI font and window scale.' },
+            { '/chains move <x> <y>', 'Set window position.' },
+            { '/chains reset', 'Reset window position and direction.' },
+        };
+        commandHelp:ieach(function(entry)
+            print(chat.header(addon.name)
+                :append(chat.success(entry[1]))
+                :append(chat.message(' - '))
+                :append(chat.message(entry[2])));
+        end);
+        return;
     end
 
     --========================================================================
@@ -1163,23 +1350,43 @@ ashita.events.register('command', 'command_cb', function (e)
     --========================================================================
     if (#args == 2) and chains.settings.display:containskey(args[2]) then
         chains.settings.display[args[2]] = not chains.settings.display[args[2]];
-        local outText = '%sskill: %s'
-        if args[2] == 'color' then
-            outText = '%s: %s'
-        end
-        print(chat.header(addon.name):append(chat.message(outText):fmt(args[2], chains.settings.display[args[2]] and 'on' or 'off')));
+        local messages = T{
+            color = 'Chains coloring is now: ',
+            weapon = 'Chains weaponskills are now: ',
+            pet = 'Chains pet skills are now: ',
+            spell = 'Chains spells are now: ',
+        };
+        local state = chains.settings.display[args[2]] and chat.success('Enabled') or chat.error('Disabled');
+        print(chat.header(addon.name):append(chat.message(messages[args[2]])):append(state));
     end
 
     --========================================================================
     -- Window management
     --========================================================================
-    if (#args == 2) and (args[2] == 'visible') then 
+    if (#args == 2) and (args[2] == 'visible') then
         chains.visible = not chains.visible;
+        if chains.visible then
+            chains.previewTarget = CreateVisiblePreviewTarget();
+        else
+            chains.previewTarget = nil;
+        end
+        local state = chains.visible and chat.success('Enabled') or chat.error('Disabled');
+        print(chat.header(addon.name):append(chat.message('Chains live preview is now: ')):append(state));
+    end
+
+    if (#args == 2) and (args[2] == 'direction') then
+        if chains.settings.direction == 'bottom' then
+            chains.settings.direction = 'top';
+        else
+            chains.settings.direction = 'bottom';
+        end
+        local direction = chains.settings.direction == 'bottom' and 'Bottom-Up' or 'Top-Down';
+        print(chat.header(addon.name):append(chat.message('Chains direction has been set to: ')):append(chat.success(direction)));
     end
 
     if (#args == 3) and (args[2] == 'scale') then
         chains.settings.font_scale = args[3]:number();
-        print(chat.header(addon.name):append(chat.message('Font scale set to %s'):fmt(chains.settings.font_scale)));
+        print(chat.header(addon.name):append(chat.message('Chains font scale has been set to: ')):append(chat.success(tostring(chains.settings.font_scale))));
     end
 
     if (#args == 4) and (args[2] == 'move') then
@@ -1187,7 +1394,18 @@ ashita.events.register('command', 'command_cb', function (e)
             x = args[3]:number(),
             y = args[4]:number(),
         };
-        print(chat.header(addon.name):append(chat.message('Window position set to x: %s, y: %s'):fmt(chains.position.x, chains.position.y)));
+        print(chat.header(addon.name):append(chat.message('Chains window has been moved to: ')):append(chat.success(('%s, %s'):fmt(chains.position.x, chains.position.y))));
+    end
+
+    if (#args == 2) and (args[2] == 'reset') then
+        chains.settings.direction = 'top';
+        chains.settings.position_x = 20;
+        chains.settings.position_y = 20;
+        chains.position = {
+            x = 20,
+            y = 20,
+        };
+        print(chat.header(addon.name):append(chat.message('Chains has been reset and moved to: ')):append(chat.success('20, 20 Top-Down')));
     end
 
 end);
