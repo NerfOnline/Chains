@@ -13,6 +13,7 @@ Chains is based on the skillchains addon by Ivaar for Ashita-v3. It has mostly b
 ### Commands
 The following commands may be used:
 
+    /chains help           -- Lists all available commands in chat.
     /chains color          -- Toggle colored skillchain properties.
     /chains weapon         -- Toggle weaponskill display.
     /chains pet            -- Toggle pet skill display.
