@@ -1,8 +1,8 @@
 # Chains - Horizon Updated
 
-- Updated all the skillchain properties to the Horizon server. This includes all of the following changes to pets:
+- Updated all the skillchain properties to the Horizon server.
 - Corrected the SMN Blood Pact values.
-- Disabled BST/SMN pet abilities that you can't skillchain.  
+- Disabled BST/SMN pet abilities that you can't skillchain.
 
 ### Active Battle Skillchain Display.
 
@@ -11,20 +11,20 @@ Displays a text object containing skillchain elements resonating on current targ
 Chains is based on the skillchains addon by Ivaar for Ashita-v3. It has mostly been recoded for Ashita-v4 while maintaining the same functionality.
 
 ### Commands
-The following commands may be used to adjust the window position.
+The following commands may be used:
 
-    /chains visible       -- displays text box - click and drag it to desired location
-    /chains move <x> <y>  -- reposition the window to the defined x, y coordinates
-    /chains scale <value> -- set font scale
-
-The following commands toggle the display information.
-
-    /chains color   -- colorize properties and elements
-    /chains pet     -- smn
-    /chains weapon  -- weapon skills
-
+    /chains color          -- Toggle colored skillchain properties.
+    /chains weapon         -- Toggle weaponskill display.
+    /chains pet            -- Toggle pet skill display.
+    /chains spell          -- Toggle spell display.
+    /chains visible        -- Show live preview and unlock the window for moving.
+    /chains direction      -- Toggle top-down or bottom-up layout direction.
+    /chains scale <value>  -- Set UI font and window scale.
+    /chains move <x> <y>   -- Set window position.
+    /chains reset          -- Reset window position and direction.
+    
 ### Acknowledgments
-All credit goes to Ivaar for the original skillchains implementation which was used as the tempalte for how to accomplish the desired results and how to deal with some of the corner cases.
+All credit goes to Ivaar for the original skillchains implementation which was used as the template for how to accomplish the desired results and how to deal with some of the corner cases.
 
 Special thanks to Atom0s and Thorny. Many of their addons are used as examples of how to accomplish various tasks.
 
