@@ -21,7 +21,7 @@
 
 addon.name     = 'chains';
 addon.author   = 'Sippius, Ivaar, and NerfOnline';
-addon.version  = '0.85a-Pre-release';
+addon.version  = '0.85b-Pre-release';
 addon.desc     = 'Display current skillchain options.';
 
 require('common');
@@ -59,7 +59,8 @@ local chains = T{
     settings = settings.load(default_settings),
     visible = false,
     previewTarget = nil,
-    move = nil,
+    position = nil,
+    last_window_height = 0,
 
     forceAeonic = 0, -- set from 0 to 3
     forceImmanence = false, -- boolean
@@ -510,8 +511,9 @@ local function CreateVisiblePreviewTarget()
 end
 
 --=============================================================================
--- Draw a single line of text centered in the current window
+-- Return the pixel width of a text string using the current font
 ---@param text string
+---@return number
 --=============================================================================
 local function GetTextWidth(text)
     local width = imgui.CalcTextSize(text);
@@ -521,6 +523,10 @@ local function GetTextWidth(text)
     return width or 0;
 end
 
+--=============================================================================
+-- Draw a single line of text centered in the current window
+---@param text string
+--=============================================================================
 local function DrawCenteredText(text)
     local textWidth = GetTextWidth(text);
     local windowWidth = imgui.GetWindowWidth();
@@ -528,15 +534,18 @@ local function DrawCenteredText(text)
     imgui.Text(text);
 end
 
+--=============================================================================
+-- Draw the preview header/footer chrome
+--=============================================================================
 local function DrawPreviewChrome()
     DrawCenteredText('--- Chains Live Preview ---');
     DrawCenteredText('Click and Drag to Move Display');
 end
 
 --=============================================================================
--- Measure the widest line for auto-fit window width
+-- Measure the widest content line to determine auto-fit window width
 ---@param targetEntry table
----@param skillchains table|nil
+---@param skillchains table
 ---@param showChrome boolean
 ---@return number
 --=============================================================================
@@ -547,51 +556,49 @@ local function MeasureChainWidth(targetEntry, skillchains, showChrome)
         maxWidth = math.max(maxWidth, GetTextWidth(text));
     end
 
+    -- Chrome lines (preview header/footer)
     if showChrome then
         consider('--- Chains Live Preview ---');
         consider('Click and Drag to Move Display');
     end
 
+    -- Timer line (worst-case width)
     consider('Wait  99');
     consider('Go!   99');
     consider('Burst 99');
+
+    -- Step line
     consider(('Step: %d >> %s'):fmt(targetEntry.step, targetEntry.en));
 
+    -- Property/element line
     if targetEntry.bound then
         consider(('[Chainbound Lv.%d]'):fmt(targetEntry.bound));
     else
         local propWidth = GetTextWidth('[') + GetTextWidth(']');
         for k, v in pairs(targetEntry.property) do
-            if k > 1 then
-                propWidth = propWidth + GetTextWidth(', ');
-            end
+            if k > 1 then propWidth = propWidth + GetTextWidth(', '); end
             propWidth = propWidth + GetTextWidth(v);
         end
         if targetEntry.step > 1 and chainInfo[targetEntry.property[1]] then
             propWidth = propWidth + GetTextWidth(' (') + GetTextWidth(')');
             for k, v in pairs(chainInfo[targetEntry.property[1]].burst) do
-                if k > 1 then
-                    propWidth = propWidth + GetTextWidth(', ');
-                end
+                if k > 1 then propWidth = propWidth + GetTextWidth(', '); end
                 propWidth = propWidth + GetTextWidth(v);
             end
         end
         maxWidth = math.max(maxWidth, propWidth);
     end
 
-    if skillchains then
-        for _, v in pairs(skillchains) do
-            maxWidth = math.max(maxWidth, GetTextWidth(v.outText) + GetTextWidth(' ') + GetTextWidth(v.outProp));
-        end
+    -- Closer lines (weaponskill + property name)
+    for _, v in pairs(skillchains) do
+        consider(v.outText .. ' ' .. v.outProp);
     end
 
+    -- Add window padding
     local padding = 16;
     local style = imgui.GetStyle();
     if style and style.WindowPadding then
-        local padX = style.WindowPadding.x or style.WindowPadding[1];
-        if padX then
-            padding = padX * 2;
-        end
+        padding = (style.WindowPadding.x or style.WindowPadding[1] or 8) * 2;
     end
 
     return maxWidth + padding;
@@ -698,10 +705,10 @@ local GetSkillchains = function(target, actionsOverride)
 end
 
 --=============================================================================
--- Draw the skillchain panel body for a target entry
----@param targetEntry table
----@param skillchains table|nil Precomputed closers (optional)
----@param showChrome boolean|nil Preview header/footer when visible
+-- Draw the skillchain panel content
+---@param targetEntry table   Current target skillchain state
+---@param skillchains table   Precomputed list of closing weaponskills
+---@param showChrome boolean  Show preview header/footer
 --=============================================================================
 local function DrawChainContent(targetEntry, skillchains, showChrome)
     local now = os.time();
@@ -709,18 +716,12 @@ local function DrawChainContent(targetEntry, skillchains, showChrome)
     local timer = targetEntry.dur - timediff;
     local bottomUp = chains.settings.direction == 'bottom';
 
-    if not targetEntry.closed then
-        skillchains = skillchains or GetSkillchains(targetEntry);
-    else
-        skillchains = skillchains or T{};
-    end
-
     local function drawTimer()
         if not targetEntry.closed then
             if timediff < targetEntry.wait then
-                imgui.TextColored({ 1.0, 0.0, 0.0, 1.0 },('Wait  %d'):fmt(targetEntry.wait-timediff));
+                imgui.TextColored({ 1.0, 0.0, 0.0, 1.0 }, ('Wait  %d'):fmt(targetEntry.wait - timediff));
             else
-                imgui.TextColored({ 0.0, 1.0, 0.0, 1.0 },('Go!   %d'):fmt(timer));
+                imgui.TextColored({ 0.0, 1.0, 0.0, 1.0 }, ('Go!   %d'):fmt(timer));
             end
         else
             imgui.Text(('Burst %d'):fmt(timer));
@@ -737,13 +738,13 @@ local function DrawChainContent(targetEntry, skillchains, showChrome)
         if targetEntry.bound then
             imgui.Text(('Chainbound Lv.%d'):fmt(targetEntry.bound));
         else
-            for k,v in pairs(targetEntry.property) do
+            for k, v in pairs(targetEntry.property) do
                 if k > 1 then
-                    imgui.SameLine(0,0);
+                    imgui.SameLine(0, 0);
                     imgui.Text(',');
                     imgui.SameLine();
                 end
-                imgui.TextColored(GetPropertyColor(v),v);
+                imgui.TextColored(GetPropertyColor(v), v);
             end
         end
         imgui.SameLine();
@@ -752,13 +753,13 @@ local function DrawChainContent(targetEntry, skillchains, showChrome)
             imgui.SameLine();
             imgui.Text(' (');
             imgui.SameLine();
-            for k,v in pairs(chainInfo[targetEntry.property[1]].burst) do
+            for k, v in pairs(chainInfo[targetEntry.property[1]].burst) do
                 if k > 1 then
-                    imgui.SameLine(0,0);
+                    imgui.SameLine(0, 0);
                     imgui.Text(',');
                     imgui.SameLine();
                 end
-                imgui.TextColored(GetPropertyColor(v),v);
+                imgui.TextColored(GetPropertyColor(v), v);
             end
             imgui.SameLine();
             imgui.Text(')');
@@ -766,16 +767,16 @@ local function DrawChainContent(targetEntry, skillchains, showChrome)
     end
 
     local function drawClosers()
-        if targetEntry.closed then
-            return;
-        end
-        for _,v in pairs(skillchains) do
+        if targetEntry.closed then return; end
+        for _, v in pairs(skillchains) do
             imgui.Text(v.outText);
             imgui.SameLine();
             imgui.TextColored(GetPropertyColor(v.outProp), v.outProp);
         end
     end
 
+    -- Bottom-up: closers on top, timer on bottom (header above)
+    -- Top-down: timer on top, closers on bottom (footer below)
     if bottomUp then
         if showChrome then
             DrawPreviewChrome();
@@ -1249,13 +1250,14 @@ ashita.events.register('d3d_present', 'present_cb', function ()
 
         if render then
             targetEntry = targetTable[targetId];
-            skillchains = GetSkillchains(targetEntry);
+            skillchains = targetEntry.closed and T{} or GetSkillchains(targetEntry);
         elseif chains.visible and chains.previewTarget then
             showChrome = true;
             targetEntry = chains.previewTarget;
             skillchains = GetSkillchains(targetEntry, GetAxePreviewSkills());
         end
 
+        -- Window flags (no title bar, no resize handle, auto-fit height)
         local flags = bit.bor(
             ImGuiWindowFlags_NoDecoration,
             ImGuiWindowFlags_AlwaysAutoResize,
@@ -1263,14 +1265,23 @@ ashita.events.register('d3d_present', 'present_cb', function ()
             ImGuiWindowFlags_NoFocusOnAppearing,
             ImGuiWindowFlags_NoNav)
 
-        imgui.SetNextWindowBgAlpha(0.8)
+        -- Bottom-up: position_y stores the bottom edge; top-down: the top edge
+        local bottomUp = chains.settings.direction == 'bottom';
+        local movedByCommand = chains.position ~= nil;
 
-        if chains.position then
+        imgui.SetNextWindowBgAlpha(0.8);
+
+        if movedByCommand then
             imgui.SetNextWindowPos({ chains.position.x, chains.position.y }, ImGuiCond_Always, { 0, 0 });
         else
-            imgui.SetNextWindowPos({ chains.settings.position_x, chains.settings.position_y }, ImGuiCond_Appearing, { 0, 0 });
+            local startY = chains.settings.position_y;
+            if bottomUp then
+                startY = startY - chains.last_window_height;
+            end
+            imgui.SetNextWindowPos({ chains.settings.position_x, startY }, ImGuiCond_Appearing, { 0, 0 });
         end
 
+        -- Scale font and measure content width for auto-fit
         if targetEntry then
             ApplyFontScale(chains.settings.font_scale);
             local contentWidth = MeasureChainWidth(targetEntry, skillchains, showChrome);
@@ -1280,16 +1291,34 @@ ashita.events.register('d3d_present', 'present_cb', function ()
         end
 
         if (imgui.Begin('chains', true, flags)) then
+            -- Clear one-shot position override from /chains move or /chains reset
+            chains.position = nil;
+
+            local windowX, windowY = imgui.GetWindowPos();
+            local _, windowHeight = imgui.GetWindowSize();
+            local dragging = imgui.IsMouseDown(0) and (imgui.IsWindowFocused() or imgui.IsWindowHovered());
+
+            -- Pin bottom edge when bottom-up so shrinking content doesn't shift the window down
+            if bottomUp and not movedByCommand and not dragging then
+                local anchoredY = chains.settings.position_y - windowHeight;
+                if math.abs(anchoredY - windowY) > 0.5 then
+                    imgui.SetWindowPos({ windowX, anchoredY });
+                    windowY = anchoredY;
+                end
+            end
+
             if targetEntry then
                 DrawChainContent(targetEntry, skillchains, showChrome);
             end
 
-            if chains.position then
-                chains.position = nil;
+            -- Persist the anchor point each frame
+            chains.last_window_height = windowHeight;
+            chains.settings.position_x = windowX;
+            if bottomUp then
+                chains.settings.position_y = windowY + windowHeight;
+            else
+                chains.settings.position_y = windowY;
             end
-
-            -- store current window position
-            chains.settings.position_x, chains.settings.position_y = imgui.GetWindowPos();
         end
         imgui.End();
 
@@ -1375,10 +1404,15 @@ ashita.events.register('command', 'command_cb', function (e)
     end
 
     if (#args == 2) and (args[2] == 'direction') then
+        local height = chains.last_window_height or 0;
         if chains.settings.direction == 'bottom' then
+            -- Convert stored bottom edge back to top edge
             chains.settings.direction = 'top';
+            chains.settings.position_y = chains.settings.position_y - height;
         else
+            -- Convert stored top edge to bottom edge
             chains.settings.direction = 'bottom';
+            chains.settings.position_y = chains.settings.position_y + height;
         end
         local direction = chains.settings.direction == 'bottom' and 'Bottom-Up' or 'Top-Down';
         print(chat.header(addon.name):append(chat.message('Chains direction has been set to: ')):append(chat.success(direction)));
