@@ -21,7 +21,7 @@
 
 addon.name     = 'chains';
 addon.author   = 'Sippius, Ivaar, and NerfOnline';
-addon.version  = '0.85b-Pre-release';
+addon.version  = '0.85c-Pre-release';
 addon.desc     = 'Display current skillchain options.';
 
 require('common');
@@ -60,7 +60,7 @@ local chains = T{
     visible = false,
     previewTarget = nil,
     position = nil,
-    last_window_height = 0,
+    lastWindowHeight = 0,
 
     forceAeonic = 0, -- set from 0 to 3
     forceImmanence = false, -- boolean
@@ -72,7 +72,7 @@ local chains = T{
 local playerID;
 
 -- store list of valid player/pet skills
--- * capture bluskill on 0x44 packet or first GetSkillchains call
+-- * capture bluskill on every GetSkillchains call (set spells can change anytime)
 -- * capture wepskill on 0xAC packet or first GetSkillchains call
 -- * capture petskill on 0xAC packet or first GetSkillchains call
 -- * capture schskill on load
@@ -545,7 +545,7 @@ end
 --=============================================================================
 -- Measure the widest content line to determine auto-fit window width
 ---@param targetEntry table
----@param skillchains table
+---@param skillchains table Grouped weapon and spell closers
 ---@param showChrome boolean
 ---@return number
 --=============================================================================
@@ -589,9 +589,11 @@ local function MeasureChainWidth(targetEntry, skillchains, showChrome)
         maxWidth = math.max(maxWidth, propWidth);
     end
 
-    -- Closer lines (weaponskill + property name)
-    for _, v in pairs(skillchains) do
-        consider(v.outText .. ' ' .. v.outProp);
+    -- Closer lines (weaponskill/spell + property name)
+    for _, group in pairs(skillchains) do
+        for _, v in pairs(group) do
+            consider(v.outText .. ' ' .. v.outProp);
+        end
     end
 
     -- Add window padding
@@ -605,18 +607,17 @@ local function MeasureChainWidth(targetEntry, skillchains, showChrome)
 end
 
 --=============================================================================
--- Return formatted table of valid skillchain options
+-- Return formatted weapon and spell skillchain options
 ---@param target table Target skillchain state
 ---@param actionsOverride? table Optional action list (visible preview)
----@return table chainTable Current skillchain options
+---@return table skillchains Current options grouped by weapon and spell
 --=============================================================================
 local GetSkillchains = function(target, actionsOverride)
-    local actions = T{};
-    local chainTable = T{};
-    local levelTable = T{{},{},{},{}};
+    local weaponActions = T{};
+    local spellActions = T{};
 
     if actionsOverride then
-        actions = actionsOverride;
+        weaponActions = actionsOverride;
     else
         local mainJob = GetPlayer().MainJob;
         local enableSCH = mainJob == 'SCH' and ((playerTable[playerID] and playerTable[playerID][statusID.IM]) or
@@ -634,80 +635,81 @@ local GetSkillchains = function(target, actionsOverride)
         -- Create petskill table if it does not already exist
         -- Will update through incoming 0xAC packets
         if mainJob == 'SMN' and not actionTable.petskill then
-                actionTable.petskill = GetPetskills();
+            actionTable.petskill = GetPetskills();
         end
 
-        -- Create bluskill table if it does not already exist
-        -- Will update through incoming 0x44 packets
-        if mainJob == 'BLU' and not actionTable.bluskill then
+        -- Read the BLU spell set live since the player can change it at any time
+        if enableBLU and chains.settings.display.spell then
             actionTable.bluskill = GetBluskills();
         end
 
         -- Initialize actions with weaponskills
         if chains.settings.display.weapon then
-            actions = actions:extend(actionTable.wepskill);
+            weaponActions = weaponActions:extend(actionTable.wepskill);
         end
 
-        -- Add skill tables based on job and active buffs
+        -- Pet skills remain grouped with weaponskills
         if chains.settings.display.pet and mainJob == 'SMN' and actionTable.petskill then
-            actions = actions:extend(actionTable.petskill);
+            weaponActions = weaponActions:extend(actionTable.petskill);
         elseif chains.settings.display.spell and enableBLU and actionTable.bluskill then
-            actions = actions:extend(actionTable.bluskill);
+            spellActions = spellActions:extend(actionTable.bluskill);
         elseif chains.settings.display.spell and enableSCH and actionTable.schskill then
-            actions = actions:extend(actionTable.schskill);
+            spellActions = spellActions:extend(actionTable.schskill);
         end
     end
 
-    -- Search for valid skillchains and store into a table per skillchain level
-    -- iterate over current abilities
-    for _,action in pairs(actions) do
+    local function buildList(actions)
+        local chainTable = T{};
+        local levelTable = T{{},{},{},{}};
 
-        -- insert aeonic property
-        local actionProperty = GetAeonicProperty(action,playerID);
+        -- Search for valid skillchains and group them by resulting level
+        for _, action in pairs(actions) do
+            local actionProperty = GetAeonicProperty(action, playerID);
 
-        -- iterate over 1st property (target property)
-        for _,prop1 in pairs(target.property) do
-            local match = nil;
+            for _, prop1 in pairs(target.property) do
+                local match = nil;
 
-            -- iterate over 2nd property (action property) and exit after first match
-            for _,prop2 in pairs(actionProperty) do
-                match = chainInfo[prop1][prop2];
-                if match then break end
-            end
-
-            -- store first match and exit
-            if match then
-                -- check for ultimate skillchain
-                local checkAeonic = chainInfo[prop1].level == 3 and (target.step + GetAftermathLevel()) >= 4;
-                if checkAeonic and chainInfo[prop1]['aeonic'] then
-                    match = chainInfo[prop1]['aeonic'];
+                for _, prop2 in pairs(actionProperty) do
+                    match = chainInfo[prop1][prop2];
+                    if match then break; end
                 end
 
-                -- add skillchain information to table
-                local skillchain = {
-                    outText = ('%-17s>> Lv.%d'):fmt(action.en, match.level),
-                    outProp = match.skillchain,
-                }
-                table.insert(levelTable[match.level],skillchain);
-                break;
-            end;
+                if match then
+                    local checkAeonic = chainInfo[prop1].level == 3
+                        and (target.step + GetAftermathLevel()) >= 4;
+                    if checkAeonic and chainInfo[prop1].aeonic then
+                        match = chainInfo[prop1].aeonic;
+                    end
+
+                    table.insert(levelTable[match.level], {
+                        outText = ('%-17s>> Lv.%d'):fmt(action.en, match.level),
+                        outProp = match.skillchain,
+                    });
+                    break;
+                end
+            end
         end
+
+        -- Preserve the existing highest-to-lowest skillchain level order
+        for level = 4, 1, -1 do
+            for _, entry in pairs(levelTable[level]) do
+                table.insert(chainTable, entry);
+            end
+        end
+
+        return chainTable;
     end
 
-    -- Sort results to a single table based on skillchain level
-    for x=4,1,-1 do
-        for _,v in pairs(levelTable[x]) do
-            table.insert(chainTable,v);
-        end
-    end
-
-    return chainTable;
+    return T{
+        weapon = buildList(weaponActions),
+        spell = buildList(spellActions),
+    };
 end
 
 --=============================================================================
 -- Draw the skillchain panel content
 ---@param targetEntry table   Current target skillchain state
----@param skillchains table   Precomputed list of closing weaponskills
+---@param skillchains table   Precomputed weapon and spell closer groups
 ---@param showChrome boolean  Show preview header/footer
 --=============================================================================
 local function DrawChainContent(targetEntry, skillchains, showChrome)
@@ -768,11 +770,20 @@ local function DrawChainContent(targetEntry, skillchains, showChrome)
 
     local function drawClosers()
         if targetEntry.closed then return; end
-        for _, v in pairs(skillchains) do
-            imgui.Text(v.outText);
-            imgui.SameLine();
-            imgui.TextColored(GetPropertyColor(v.outProp), v.outProp);
+
+        local function drawGroup(group)
+            for _, v in pairs(group) do
+                imgui.Text(v.outText);
+                imgui.SameLine();
+                imgui.TextColored(GetPropertyColor(v.outProp), v.outProp);
+            end
         end
+
+        drawGroup(skillchains.weapon);
+        if #skillchains.weapon > 0 and #skillchains.spell > 0 then
+            imgui.Separator();
+        end
+        drawGroup(skillchains.spell);
     end
 
     -- Bottom-up: closers on top, timer on bottom (header above)
@@ -1182,20 +1193,6 @@ ashita.events.register('packet_in', 'packet_in_cb', function (e)
         ResetSkillchains();
 
         --actionTable.lastAC = e.data:sub(5); --dedupe?
-
-    -- BLU spells - e.data:byte(5) == 0x10 indicates BLU, e.data:byte(6) == 0 indicates main job
-    elseif e.id == 0x44 and e.data:byte(5) == 0x10 and e.data:byte(6) == 0 then -- and e.data:sub(9, 18) ~= actionTable.last44 then
-        actionTable.bluskill = T{};
-
-        --Iterate through bytes 8+1 through 27+1 - corresponds to the 20 BLU spell slots
-        for x = 8+1, 27+1 do
-            local match = skills[4] and skills[4][e.data:byte(x)+512]
-            if match then
-                table.insert(actionTable.bluskill, match);
-            end
-        end
-
-        --actionTable.last44 = e.data:sub(9, 18); --dedupe?
     end
 
 end);
@@ -1250,7 +1247,9 @@ ashita.events.register('d3d_present', 'present_cb', function ()
 
         if render then
             targetEntry = targetTable[targetId];
-            skillchains = targetEntry.closed and T{} or GetSkillchains(targetEntry);
+            skillchains = targetEntry.closed
+                and T{ weapon = T{}, spell = T{} }
+                or GetSkillchains(targetEntry);
         elseif chains.visible and chains.previewTarget then
             showChrome = true;
             targetEntry = chains.previewTarget;
@@ -1276,7 +1275,7 @@ ashita.events.register('d3d_present', 'present_cb', function ()
         else
             local startY = chains.settings.position_y;
             if bottomUp then
-                startY = startY - chains.last_window_height;
+                startY = startY - chains.lastWindowHeight;
             end
             imgui.SetNextWindowPos({ chains.settings.position_x, startY }, ImGuiCond_Appearing, { 0, 0 });
         end
@@ -1312,7 +1311,7 @@ ashita.events.register('d3d_present', 'present_cb', function ()
             end
 
             -- Persist the anchor point each frame
-            chains.last_window_height = windowHeight;
+            chains.lastWindowHeight = windowHeight;
             chains.settings.position_x = windowX;
             if bottomUp then
                 chains.settings.position_y = windowY + windowHeight;
@@ -1404,7 +1403,7 @@ ashita.events.register('command', 'command_cb', function (e)
     end
 
     if (#args == 2) and (args[2] == 'direction') then
-        local height = chains.last_window_height or 0;
+        local height = chains.lastWindowHeight or 0;
         if chains.settings.direction == 'bottom' then
             -- Convert stored bottom edge back to top edge
             chains.settings.direction = 'top';
