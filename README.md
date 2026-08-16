@@ -18,6 +18,8 @@ The following commands may be used:
     /chains weapon         -- Toggle weaponskill display.
     /chains pet            -- Toggle pet skill display.
     /chains spell          -- Toggle spell display.
+    /chains ability        -- Toggle ability requirement for spell skill display.
+    /chains smn            -- Toggles requirement for avatar to be summoned for pet skill display.
     /chains visible        -- Show live preview and unlock the window for moving.
     /chains direction      -- Toggle top-down or bottom-up layout direction.
     /chains scale <value>  -- Set UI font and window scale.
