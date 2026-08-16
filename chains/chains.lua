@@ -21,7 +21,7 @@
 
 addon.name     = 'chains';
 addon.author   = 'Sippius, Ivaar, and NerfOnline';
-addon.version  = '0.85c-Pre-release';
+addon.version  = '0.85d-Pre-release';
 addon.desc     = 'Display current skillchain options.';
 
 require('common');
@@ -47,6 +47,8 @@ local default_settings = T{
     position_y = 100,
     font_scale = 1.0,
     direction = 'top', -- 'top' (top-down) or 'bottom' (bottom-up)
+    ability = false, -- require Chain Affinity, Azure Lore, or Immanence
+    smn = true, -- require the matching avatar to be summoned
     display = T{
         color = true,
         pet = true,
@@ -74,7 +76,7 @@ local playerID;
 -- store list of valid player/pet skills
 -- * capture bluskill on every GetSkillchains call (set spells can change anytime)
 -- * capture wepskill on 0xAC packet or first GetSkillchains call
--- * capture petskill on 0xAC packet or first GetSkillchains call
+-- * capture petskill on every GetSkillchains call (summoned avatar can change anytime)
 -- * capture schskill on load
 local actionTable = T{
     schskill = skills.immanence,
@@ -183,6 +185,8 @@ colors.Scission =      colors.Earth;
 colors.Detonation =    colors.Wind;
 colors.Liquefaction =  colors.Fire;
 colors.Impaction =     colors.Lightning;
+colors.Ready =         { 1.0, 1.0, 1.0, 1.0 };
+colors.Unavailable =   { 0.65, 0.65, 0.65, 1.0 };
 
 local statusID = {
     AL  = 163, -- Azure Lore
@@ -266,12 +270,18 @@ settings.register('settings', 'settings_update', function (s)
     if chains.settings.direction == nil then
         chains.settings.direction = 'top';
     end
+    if chains.settings.ability == nil then
+        chains.settings.ability = false;
+    end
+    if chains.settings.smn == nil then
+        chains.settings.smn = true;
+    end
 
     settings.save();
 end);
 
 --=============================================================================
--- Return color formatt table
+-- Return color format table
 ---@param t string Skillchain property
 ---@return table
 --=============================================================================
@@ -298,7 +308,7 @@ local GetBuffCount = function(matchBuff)
         local matchText = string.lower(matchBuff);
         for _, buff in pairs(buffs) do
             local buffString = AshitaCore:GetResourceManager():GetString("buffs.names", buff);
-			if (buffString ~= nil) and (string.lower(buffString) == matchText) then
+            if (buffString ~= nil) and (string.lower(buffString) == matchText) then
                 count = count + 1;
             end
         end
@@ -398,26 +408,63 @@ local GetWeaponskills = function()
 end
 
 --=============================================================================
--- Return table with current pet skill data
+-- Return the name of the player's currently summoned pet
+---@return string|nil petName
+--=============================================================================
+local function GetCurrentPetName()
+    local party = AshitaCore:GetMemoryManager():GetParty();
+    local entity = AshitaCore:GetMemoryManager():GetEntity();
+    local playerIndex = party:GetMemberTargetIndex(0);
+    local petIndex = entity:GetPetTargetIndex(playerIndex);
+
+    if petIndex == 0 then
+        return nil;
+    end
+
+    return entity:GetName(petIndex);
+end
+
+--=============================================================================
+-- Return whether the player has learned an avatar's summon spell
+---@param avatar string
+---@return boolean
+--=============================================================================
+local function HasAvatar(avatar)
+    local spell = AshitaCore:GetResourceManager():GetSpellByName(avatar, 0);
+    return spell ~= nil
+        and AshitaCore:GetMemoryManager():GetPlayer():HasSpell(spell.Index);
+end
+
+--=============================================================================
+-- Return available SMN pet skills based on ownership, level, and settings
 ---@return table skillTable Currently available pet skills
 --=============================================================================
 local function GetPetskills()
     local skillTable = T{};
-    local pPlayer = AshitaCore:GetMemoryManager():GetPlayer();
+    local player = GetPlayer();
+    local smnLevel = player.MainJob == 'SMN' and player.MainJobSync
+        or player.SubJob == 'SMN' and player.SubJobSync
+        or 0;
+    local currentPet = GetCurrentPetName();
 
-    for k,v in pairs(skills[13]) do
-        if v and pPlayer:HasAbility(k+512) then
-            skillTable:append(v);
+    for _, skill in pairs(skills[13]) do
+        local meetsLevel = smnLevel >= skill.level;
+        local ownsAvatar = HasAvatar(skill.avatar);
+        local meetsSummonRequirement = not chains.settings.smn
+            or currentPet == skill.avatar;
+
+        if meetsLevel and ownsAvatar and meetsSummonRequirement then
+            skillTable:append(skill);
         end
     end
 
     return skillTable;
-  end
+end
 
 --=============================================================================
 -- Define blu offset data for use by GetBluskills()
 --=============================================================================
-  local blu = {
+local blu = {
     offset = ffi.cast('uint32_t*', ashita.memory.find('FFXiMain.dll', 0, 'C1E1032BC8B0018D????????????B9????????F3A55F5E5B', 10, 0))
 };
 
@@ -427,7 +474,7 @@ local function GetPetskills()
 --=============================================================================
 -- based on code from blusets by Atom0s
 --=============================================================================
-function GetBluskills()
+local function GetBluskills()
     local skillTable = T{};
 
     local ptr = ashita.memory.read_uint32(AshitaCore:GetPointerManager():Get('inventory'));
@@ -438,7 +485,6 @@ function GetBluskills()
     if (ptr == 0) then
         return T{ };
     end
-    --local spellTable = T(ashita.memory.read_array((ptr + blu.offset[0]) + (blu.is_blu_main() and 0x04 or 0xA0), 0x14));
     local spellTable = T(ashita.memory.read_array((ptr + blu.offset[0]) + 0x04, 0x14));
 
     for _,v in pairs(spellTable) do
@@ -545,7 +591,7 @@ end
 --=============================================================================
 -- Measure the widest content line to determine auto-fit window width
 ---@param targetEntry table
----@param skillchains table Grouped weapon and spell closers
+---@param skillchains table Grouped weapon, spell, and pet closers
 ---@param showChrome boolean
 ---@return number
 --=============================================================================
@@ -589,10 +635,10 @@ local function MeasureChainWidth(targetEntry, skillchains, showChrome)
         maxWidth = math.max(maxWidth, propWidth);
     end
 
-    -- Closer lines (weaponskill/spell + property name)
+    -- Closer lines (weaponskill/spell/pet skill + property name)
     for _, group in pairs(skillchains) do
         for _, v in pairs(group) do
-            consider(v.outText .. ' ' .. v.outProp);
+            consider(v.outName .. v.outText .. ' ' .. v.outProp);
         end
     end
 
@@ -607,35 +653,53 @@ local function MeasureChainWidth(targetEntry, skillchains, showChrome)
 end
 
 --=============================================================================
--- Return formatted weapon and spell skillchain options
+-- Return formatted weapon, spell, and pet skillchain options
 ---@param target table Target skillchain state
 ---@param actionsOverride? table Optional action list (visible preview)
----@return table skillchains Current options grouped by weapon and spell
+---@return table skillchains Current options grouped by weapon, spell, and pet
 --=============================================================================
 local GetSkillchains = function(target, actionsOverride)
     local weaponActions = T{};
     local spellActions = T{};
+    local petActions = T{};
+    local weaponReady = true;
+    local spellReady = true;
+    local currentPet = nil;
 
     if actionsOverride then
         weaponActions = actionsOverride;
     else
-        local mainJob = GetPlayer().MainJob;
-        local enableSCH = mainJob == 'SCH' and ((playerTable[playerID] and playerTable[playerID][statusID.IM]) or
-                                                chains.forceImmanence);
-        local enableBLU = mainJob == 'BLU' and ((playerTable[playerID] and playerTable[playerID][statusID.AL]) or
-                                                (playerTable[playerID] and playerTable[playerID][statusID.CA]) or
-                                                chains.forceAffinity);
+        local player = GetPlayer();
+        local mainJob = player.MainJob;
+        local subJob = player.SubJob;
+        local isSMN = mainJob == 'SMN' or subJob == 'SMN';
+        local requireAbility = chains.settings.ability;
+        local playerBuffs = playerTable[playerID];
+        local schBuffActive = (playerBuffs and playerBuffs[statusID.IM])
+            or chains.forceImmanence;
+        local bluBuffActive = (playerBuffs and playerBuffs[statusID.AL])
+            or (playerBuffs and playerBuffs[statusID.CA])
+            or chains.forceAffinity;
+        local enableSCH = mainJob == 'SCH' and (
+            not requireAbility
+            or schBuffActive
+        );
+        local enableBLU = mainJob == 'BLU' and (
+            not requireAbility
+            or bluBuffActive
+        );
+        weaponReady = true;
+        if mainJob == 'BLU' then
+            spellReady = not not bluBuffActive;
+        elseif mainJob == 'SCH' then
+            spellReady = not not schBuffActive;
+        end
+        currentPet = isSMN and GetCurrentPetName() or nil;
 
         -- Create weaponskill table if it does not already exist
         -- Will update through incoming 0xAC packets
         if not actionTable.wepskill then
             actionTable.wepskill = GetWeaponskills();
-        end
-
-        -- Create petskill table if it does not already exist
-        -- Will update through incoming 0xAC packets
-        if mainJob == 'SMN' and not actionTable.petskill then
-            actionTable.petskill = GetPetskills();
         end
 
         -- Read the BLU spell set live since the player can change it at any time
@@ -648,17 +712,20 @@ local GetSkillchains = function(target, actionsOverride)
             weaponActions = weaponActions:extend(actionTable.wepskill);
         end
 
-        -- Pet skills remain grouped with weaponskills
-        if chains.settings.display.pet and mainJob == 'SMN' and actionTable.petskill then
-            weaponActions = weaponActions:extend(actionTable.petskill);
-        elseif chains.settings.display.spell and enableBLU and actionTable.bluskill then
+        -- Read SMN pet skills live for main or sub SMN
+        if chains.settings.display.pet and isSMN then
+            petActions = petActions:extend(GetPetskills());
+        end
+
+        -- Spell closers
+        if chains.settings.display.spell and enableBLU and actionTable.bluskill then
             spellActions = spellActions:extend(actionTable.bluskill);
         elseif chains.settings.display.spell and enableSCH and actionTable.schskill then
             spellActions = spellActions:extend(actionTable.schskill);
         end
     end
 
-    local function buildList(actions)
+    local function buildList(actions, ready)
         local chainTable = T{};
         local levelTable = T{{},{},{},{}};
 
@@ -681,9 +748,16 @@ local GetSkillchains = function(target, actionsOverride)
                         match = chainInfo[prop1].aeonic;
                     end
 
+                    local isReady = ready;
+                    if type(ready) == 'function' then
+                        isReady = ready(action);
+                    end
+
                     table.insert(levelTable[match.level], {
-                        outText = ('%-17s>> Lv.%d'):fmt(action.en, match.level),
+                        outName = ('%-17s'):fmt(action.en),
+                        outText = ('>> Lv.%d'):fmt(match.level),
                         outProp = match.skillchain,
+                        ready = not not isReady,
                     });
                     break;
                 end
@@ -701,15 +775,18 @@ local GetSkillchains = function(target, actionsOverride)
     end
 
     return T{
-        weapon = buildList(weaponActions),
-        spell = buildList(spellActions),
+        weapon = buildList(weaponActions, weaponReady),
+        spell = buildList(spellActions, spellReady),
+        pet = buildList(petActions, function (action)
+            return currentPet == action.avatar;
+        end),
     };
 end
 
 --=============================================================================
 -- Draw the skillchain panel content
 ---@param targetEntry table   Current target skillchain state
----@param skillchains table   Precomputed weapon and spell closer groups
+---@param skillchains table   Precomputed weapon, spell, and pet closer groups
 ---@param showChrome boolean  Show preview header/footer
 --=============================================================================
 local function DrawChainContent(targetEntry, skillchains, showChrome)
@@ -773,17 +850,28 @@ local function DrawChainContent(targetEntry, skillchains, showChrome)
 
         local function drawGroup(group)
             for _, v in pairs(group) do
+                imgui.TextColored(v.ready and colors.Ready or colors.Unavailable, v.outName);
+                imgui.SameLine(0, 0);
                 imgui.Text(v.outText);
                 imgui.SameLine();
                 imgui.TextColored(GetPropertyColor(v.outProp), v.outProp);
             end
         end
 
-        drawGroup(skillchains.weapon);
-        if #skillchains.weapon > 0 and #skillchains.spell > 0 then
-            imgui.Separator();
+        local firstGroup = true;
+        for _, group in ipairs(T{
+            skillchains.weapon,
+            skillchains.spell,
+            skillchains.pet,
+        }) do
+            if #group > 0 then
+                if not firstGroup then
+                    imgui.Separator();
+                end
+                drawGroup(group);
+                firstGroup = false;
+            end
         end
-        drawGroup(skillchains.spell);
     end
 
     -- Bottom-up: closers on top, timer on bottom (header above)
@@ -910,7 +998,7 @@ end
 -- https://github.com/Windower/Lua/blob/dev/addons/libs/packets/data.lua
 -- https://github.com/Windower/Lua/blob/dev/addons/libs/packets/fields.lua
 --=============================================================================
-function ParseActionPacket(e)
+local function ParseActionPacket(e)
     local bitData;
     local bitOffset;
     local maxLength = e.size * 8;
@@ -1039,8 +1127,8 @@ ashita.events.register('packet_in', 'packet_in_cb', function (e)
     if e.id == 0x28 then
 
         -- Save a little bit of processing for packets that won't relate to SC..
-        local type = ashita.bits.unpack_be(e.data_raw, 82, 4); -- byte: 0xA, bit: 0x2
-        if not T{ 3, 4, 6, 11, 13, 14 }:contains(type) then
+        local actionType = ashita.bits.unpack_be(e.data_raw, 82, 4); -- byte: 0xA, bit: 0x2
+        if not T{ 3, 4, 6, 11, 13, 14 }:contains(actionType) then
             return;
         end
 
@@ -1082,10 +1170,10 @@ ashita.events.register('packet_in', 'packet_in_cb', function (e)
             return;
         end
 
-        -- Check for valid action skill with valid added effect propery - after first setp
+        -- Check for valid action skill with valid added effect property - after first step
         if actionSkill and effectProperty then
             local step = (targetTable[target.Id] and targetTable[target.Id].step or 1) + 1
-            local delay = actionSkill and actionSkill.delay or 3
+            local delay = actionSkill.delay or 3
             local level = chainInfo[effectProperty].level
 
             -- Check for Lv.3 -> Lv.3 and bump to Lv.4 for closure
@@ -1113,7 +1201,7 @@ ashita.events.register('packet_in', 'packet_in_cb', function (e)
         elseif actionSkill and MessageTypes:contains(targetAction.Message)
             and (isPlayerInAlliance(actor) or actionPacket.Type == 13 or isAllianceAutomaton(actor))
             and (actionPacket.Type ~= 4 or (playerTable[actor])) then
-            local delay = actionSkill and actionSkill.delay or 3
+            local delay = actionSkill.delay or 3
             targetTable[target.Id] = {
                 en=actionSkill.en,
                 property=GetAeonicProperty(actionSkill,actor),
@@ -1124,7 +1212,7 @@ ashita.events.register('packet_in', 'packet_in_cb', function (e)
             };
 
         -- Check for valid actor skill with chainbound message - chainbound first step
-        -- Could be combined with previous first setp check
+        -- Could be combined with previous first step check
         elseif actionSkill and (targetAction.Message == 529) then
             targetTable[target.Id] = {
                 en=actionSkill.en,
@@ -1159,10 +1247,9 @@ ashita.events.register('packet_in', 'packet_in_cb', function (e)
             playerTable[playerID][effect] = nil;
         end
 
-    -- Character Abilities (Weaponskills and SMN PetSkills)
+    -- Character Abilities (Weaponskills)
     elseif e.id == 0x0AC then --and e.data:sub(5) ~= actionTable.lastAC then
         actionTable.wepskill = T{};
-        actionTable.petskill = T{};
 
         -- Packet contains one bit per ability to indicate if the ability is available
         -- * Byte in packet = floor(abilityID / 8) + 1
@@ -1181,18 +1268,8 @@ ashita.events.register('packet_in', 'packet_in_cb', function (e)
             end
         end
 
-        -- SMN PetSkills
-        data = e.data:sub(69);
-        for k,v in pairs(skills[13]) do
-            if math.floor((data:byte(math.floor(k/8)+1)%2^(k%8+1))/2^(k%8)) == 1 then
-                table.insert(actionTable.petskill, v);
-            end
-        end
-
         -- Reset skillchains on all active targets
         ResetSkillchains();
-
-        --actionTable.lastAC = e.data:sub(5); --dedupe?
     end
 
 end);
@@ -1248,7 +1325,7 @@ ashita.events.register('d3d_present', 'present_cb', function ()
         if render then
             targetEntry = targetTable[targetId];
             skillchains = targetEntry.closed
-                and T{ weapon = T{}, spell = T{} }
+                and T{ weapon = T{}, spell = T{}, pet = T{} }
                 or GetSkillchains(targetEntry);
         elseif chains.visible and chains.previewTarget then
             showChrome = true;
@@ -1358,6 +1435,8 @@ ashita.events.register('command', 'command_cb', function (e)
             { '/chains weapon', 'Toggle weaponskill display.' },
             { '/chains pet', 'Toggle pet skill display.' },
             { '/chains spell', 'Toggle spell display.' },
+            { '/chains ability', 'Toggle ability requirement for spell skill display.' },
+            { '/chains smn', 'Toggles requirement for avatar to be summoned for pet skill display.' },
             { '/chains visible', 'Show live preview and unlock the window for moving.' },
             { '/chains direction', 'Toggle top-down or bottom-up layout direction.' },
             { '/chains scale <n>', 'Set UI font and window scale.' },
@@ -1386,6 +1465,18 @@ ashita.events.register('command', 'command_cb', function (e)
         };
         local state = chains.settings.display[args[2]] and chat.success('Enabled') or chat.error('Disabled');
         print(chat.header(addon.name):append(chat.message(messages[args[2]])):append(state));
+    end
+
+    if (#args == 2) and (args[2] == 'ability') then
+        chains.settings.ability = not chains.settings.ability;
+        local state = chains.settings.ability and chat.success('Enabled') or chat.error('Disabled');
+        print(chat.header(addon.name):append(chat.message('Chains ability requirement is now: ')):append(state));
+    end
+
+    if (#args == 2) and (args[2] == 'smn') then
+        chains.settings.smn = not chains.settings.smn;
+        local state = chains.settings.smn and chat.success('Enabled') or chat.error('Disabled');
+        print(chat.header(addon.name):append(chat.message('Chains avatar summon requirement has been: ')):append(state));
     end
 
     --========================================================================

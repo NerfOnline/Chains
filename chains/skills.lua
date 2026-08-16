@@ -249,28 +249,28 @@ skills[3] = {
 -- On Horizon, level 70 Blood Pacts do not have skillchain attributes
 skills[13] = {
 --Carbuncle
-    [513] = {en='Poison Nails',skillchain={'Transfixion'}},
+    [513] = {en='Poison Nails',skillchain={'Transfixion'},avatar='Carbuncle',level=5},
 --Fenrir
-    [528] = {en='Moonlit Charge',skillchain={'Compression'}},
-    [529] = {en='Crescent Fang',skillchain={'Transfixion'}},
+    [528] = {en='Moonlit Charge',skillchain={'Compression'},avatar='Fenrir',level=5},
+    [529] = {en='Crescent Fang',skillchain={'Transfixion'},avatar='Fenrir',level=10},
 --Ifrit
-    [544] = {en='Punch',skillchain={'Liquefaction'}},
-    [546] = {en='Burning Strike',skillchain={'Impaction'}},
-    [547] = {en='Double Punch',skillchain={'Compression'}},
+    [544] = {en='Punch',skillchain={'Liquefaction'},avatar='Ifrit',level=1},
+    [546] = {en='Burning Strike',skillchain={'Impaction'},avatar='Ifrit',level=23},
+    [547] = {en='Double Punch',skillchain={'Compression'},avatar='Ifrit',level=30},
 --Titan
-    [560] = {en='Rock Throw',skillchain={'Scission'}},
-    [562] = {en='Rock Buster',skillchain={'Reverberation'}},
-    [563] = {en='Megalith Throw',skillchain={'Induration'}},
+    [560] = {en='Rock Throw',skillchain={'Scission'},avatar='Titan',level=1},
+    [562] = {en='Rock Buster',skillchain={'Reverberation'},avatar='Titan',level=21},
+    [563] = {en='Megalith Throw',skillchain={'Induration'},avatar='Titan',level=35},
 --Leviathan
-    [576] = {en='Barracuda Dive',skillchain={'Reverberation'}},
-    [578] = {en='Tail Whip',skillchain={'Detonation'}},
+    [576] = {en='Barracuda Dive',skillchain={'Reverberation'},avatar='Leviathan',level=1},
+    [578] = {en='Tail Whip',skillchain={'Detonation'},avatar='Leviathan',level=26},
 --Garuda
-    [592] = {en='Claw',skillchain={'Detonation'}},
+    [592] = {en='Claw',skillchain={'Detonation'},avatar='Garuda',level=1},
 --Shiva
-    [608] = {en='Axe Kick',skillchain={'Induration'}},
-    [612] = {en='Double Slap',skillchain={'Scission'}},
+    [608] = {en='Axe Kick',skillchain={'Induration'},avatar='Shiva',level=1},
+    [612] = {en='Double Slap',skillchain={'Scission'},avatar='Shiva',level=50},
 --Ramuh
-    [624] = {en='Shock Strike',skillchain={'Impaction'}},
+    [624] = {en='Shock Strike',skillchain={'Impaction'},avatar='Ramuh',level=1},
 };
 
 -- Samurai and Dancer Chainbound Abilities
@@ -404,7 +404,7 @@ skills[4] = {
     [892] = {en='Luminohelix II',skillchain={'Transfixion'},delay=5},
 };
 
--- Puppermaster Automaton Weaponskills
+-- Puppetmaster Automaton Weaponskills
 skills.pup = {
     [1940] = {en='Chimera Ripper',skillchain={'Induration','Detonation'}},
     [1941] = {en='String Clipper',skillchain={'Scission','Impaction'}},
