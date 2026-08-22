@@ -1,4 +1,4 @@
-# Chains - Horizon Updated
+# Chains
 
 - Updated all the skillchain properties to the Horizon server.
 - Corrected the SMN Blood Pact values.
