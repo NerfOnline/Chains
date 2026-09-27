@@ -30,6 +30,7 @@ local chat = require('chat');
 local imgui = require('imgui');
 local settings = require('settings');
 local skills = require('skills');
+local pets = require('pets');
 
 local function ApplyFontScale(scale)
     imgui.PushFont(imgui.GetFont(), imgui.GetFontSize() * scale)
@@ -49,6 +50,8 @@ local default_settings = T{
     direction = 'top', -- 'top' (top-down) or 'bottom' (bottom-up)
     ability = false, -- require Chain Affinity, Azure Lore, or Immanence
     smn = true, -- require the matching avatar to be summoned
+    bst = true, -- require the matching jug pet to be out
+    pup = true, -- require the matching automaton frame to be out
     display = T{
         color = true,
         pet = true,
@@ -59,7 +62,7 @@ local default_settings = T{
 
 local chains = T{
     settings = settings.load(default_settings),
-    visible = false,
+    editor = false, -- settings window from /chains, which also shows the preview
     previewTarget = nil,
     position = nil,
     lastWindowHeight = 0,
@@ -267,14 +270,19 @@ settings.register('settings', 'settings_update', function (s)
         chains.settings = s;
     end
 
-    if chains.settings.direction == nil then
-        chains.settings.direction = 'top';
+    -- Older settings files may be missing newer options.
+    if chains.settings.display == nil then
+        chains.settings.display = T{};
     end
-    if chains.settings.ability == nil then
-        chains.settings.ability = false;
+    for key, value in pairs(default_settings) do
+        if key ~= 'display' and chains.settings[key] == nil then
+            chains.settings[key] = value;
+        end
     end
-    if chains.settings.smn == nil then
-        chains.settings.smn = true;
+    for key, value in pairs(default_settings.display) do
+        if chains.settings.display[key] == nil then
+            chains.settings.display[key] = value;
+        end
     end
 
     settings.save();
@@ -425,6 +433,114 @@ local function GetCurrentPetName()
 end
 
 --=============================================================================
+-- Return true if a skill row has skillchain properties.
+-- A row without them must not open a window.
+---@param skill table|nil
+---@return boolean
+--=============================================================================
+local function hasSkillchain(skill)
+    return skill and skill.skillchain and skill.skillchain[1] ~= nil;
+end
+
+-- The client can cut a pet name off after 15 characters, so jugs are
+-- looked up by the first 15 characters of the name.
+local jugsByPrefix = {};
+for name, jug in pairs(pets.jugs) do
+    jugsByPrefix[name:sub(1, 15)] = jug;
+end
+
+--=============================================================================
+-- Return the jug pet entry for a pet name.
+---@param petName string|nil
+---@return table|nil
+--=============================================================================
+local function FindJug(petName)
+    return petName and jugsByPrefix[petName:sub(1, 15)] or nil;
+end
+
+--=============================================================================
+-- Client job data buffer. Holds the BLU spell set, or the PUP head, frame,
+-- and attachments. Based on blusets by Atom0s and PUPViewer.
+-- offset stays nil if the signature isn't found (e.g. after a client update).
+--=============================================================================
+local jobData = {};
+do
+    local address = ashita.memory.find('FFXiMain.dll', 0, 'C1E1032BC8B0018D????????????B9????????F3A55F5E5B', 10, 0);
+    if address ~= 0 then
+        jobData.offset = ffi.cast('uint32_t*', address);
+    end
+end
+
+-- Last PUP 0x044 packet values. The frame is used when the buffer can't be read.
+-- The skills are the automaton's own, already capped by frame and PUP level.
+local pupPacket = { frame = 0, melee = nil, ranged = nil };
+
+--=============================================================================
+-- Return the job data buffer as a table of bytes.
+---@param count number
+---@return table|nil
+--=============================================================================
+local function ReadJobData(count)
+    if not jobData.offset then
+        return nil;
+    end
+    local ptr = ashita.memory.read_uint32(AshitaCore:GetPointerManager():Get('inventory'));
+    if (ptr == 0) then
+        return nil;
+    end
+    ptr = ashita.memory.read_uint32(ptr);
+    if (ptr == 0) then
+        return nil;
+    end
+    return ashita.memory.read_array((ptr + jobData.offset[0]) + 0x04, count);
+end
+
+--=============================================================================
+-- Return the pets.frames entry for the equipped automaton frame.
+-- The buffer only holds PUP data while PUP is the main job.
+---@return table|nil frame
+--=============================================================================
+local function GetAutomatonFrame()
+    local frameByte = pupPacket.frame;
+    if AshitaCore:GetMemoryManager():GetPlayer():GetMainJob() == 18 then
+        local data = ReadJobData(2);
+        if data and data[2] and data[2] ~= 0 then
+            frameByte = data[2];
+        end
+    end
+
+    -- Frame item ids are 0x2000 plus the frame byte.
+    for _, frame in pairs(pets.frames) do
+        if frame.item == 0x2000 + frameByte then
+            return frame;
+        end
+    end
+    return nil;
+end
+
+--=============================================================================
+-- Return the automaton's skill. Sharpshot uses ranged, the rest melee.
+-- The player's own skill is only capped by main job level, so it runs too
+-- high on /PUP. It is only used until the first 0x044 packet arrives.
+---@param ranged boolean
+---@return number
+--=============================================================================
+local function GetAutomatonSkill(ranged)
+    local fromPacket = ranged and pupPacket.ranged or pupPacket.melee;
+    if fromPacket then
+        return fromPacket;
+    end
+    local skill = AshitaCore:GetMemoryManager():GetPlayer():GetCombatSkill(ranged and 23 or 22);
+    return skill and skill:GetSkill() or 0;
+end
+
+-- BST and PUP rows are shared tables, so each list entry is a small copy
+-- that remembers which pet move it came from.
+local function PetAction(skill, id, kind)
+    return { en = skill.en, skillchain = skill.skillchain, id = id, kind = kind };
+end
+
+--=============================================================================
 -- Return whether the player has learned an avatar's summon spell
 ---@param avatar string
 ---@return boolean
@@ -448,12 +564,12 @@ local function GetPetskills()
     local currentPet = GetCurrentPetName();
 
     for _, skill in pairs(skills[13]) do
-        local meetsLevel = smnLevel >= skill.level;
-        local ownsAvatar = HasAvatar(skill.avatar);
+        local meetsLevel = skill.level ~= nil and smnLevel >= skill.level;
         local meetsSummonRequirement = not chains.settings.smn
             or currentPet == skill.avatar;
 
-        if meetsLevel and ownsAvatar and meetsSummonRequirement then
+        -- HasAvatar is a name lookup, so it goes last
+        if meetsLevel and meetsSummonRequirement and HasAvatar(skill.avatar) then
             skillTable:append(skill);
         end
     end
@@ -462,32 +578,70 @@ local function GetPetskills()
 end
 
 --=============================================================================
--- Define blu offset data for use by GetBluskills()
+-- Return BST Ready moves. With /chains bst on, only the current jug's moves.
+---@param currentJug table|nil From FindJug
+---@return table skillTable
 --=============================================================================
-local blu = {
-    offset = ffi.cast('uint32_t*', ashita.memory.find('FFXiMain.dll', 0, 'C1E1032BC8B0018D????????????B9????????F3A55F5E5B', 10, 0))
-};
+local function GetBstskills(currentJug)
+    local skillTable = T{};
+    if not skills.bst then
+        return skillTable;
+    end
+
+    local jug = chains.settings.bst and (currentJug or {});
+
+    for id, skill in pairs(skills.bst) do
+        if hasSkillchain(skill) and (not jug or jug[id]) then
+            skillTable:append(PetAction(skill, id, 'bst'));
+        end
+    end
+
+    return skillTable;
+end
+
+--=============================================================================
+-- Return automaton weaponskills the automaton has the skill to use.
+-- With /chains pup on, only the equipped frame's weaponskills.
+---@param currentFrame table|nil From GetAutomatonFrame
+---@return table skillTable
+--=============================================================================
+local function GetPupskills(currentFrame)
+    local skillTable = T{};
+    if not skills.pup then
+        return skillTable;
+    end
+
+    local frames = pets.frames;
+    if chains.settings.pup then
+        frames = { currentFrame };
+    end
+
+    local melee = GetAutomatonSkill(false);
+    local ranged = GetAutomatonSkill(true);
+    local added = {};
+
+    for _, frame in pairs(frames) do
+        local skillLevel = frame.ranged and ranged or melee;
+        for id, required in pairs(frame) do
+            local skill = skills.pup[id];
+            if type(id) == 'number' and not added[id] and hasSkillchain(skill) and skillLevel >= required then
+                skillTable:append(PetAction(skill, id, 'pup'));
+                added[id] = true;
+            end
+        end
+    end
+
+    return skillTable;
+end
 
 --=============================================================================
 -- Returns the table of current set BLU spells.
 ---@return table skillTable The current set BLU spells.
 --=============================================================================
--- based on code from blusets by Atom0s
---=============================================================================
 local function GetBluskills()
     local skillTable = T{};
 
-    local ptr = ashita.memory.read_uint32(AshitaCore:GetPointerManager():Get('inventory'));
-    if (ptr == 0) then
-        return T{ };
-    end
-    ptr = ashita.memory.read_uint32(ptr);
-    if (ptr == 0) then
-        return T{ };
-    end
-    local spellTable = T(ashita.memory.read_array((ptr + blu.offset[0]) + 0x04, 0x14));
-
-    for _,v in pairs(spellTable) do
+    for _,v in pairs(ReadJobData(0x14) or {}) do
         if skills[4] and skills[4][v+512] then
             skillTable:append(skills[4][v+512]);
         end
@@ -527,23 +681,65 @@ local GetAeonicProperty = function(action, actor)
 end
 
 --=============================================================================
--- Axe weaponskills used by /chains visible preview (excludes IDs 73-77)
+-- Example closers for the settings preview.
+-- One of each pet is assumed out. Turning that requirement off shows the other.
+---@return table skillchains
 --=============================================================================
-local function GetAxePreviewSkills()
-    local skillTable = T{};
-    for id = 64, 72 do
-        if skills[3][id] then
-            skillTable:append(skills[3][id]);
+local function GetPreviewSkillchains()
+    local function row(skill, ready)
+        return {
+            outName = ('%-17s'):fmt(skill.en),
+            outText = '>> Lv.2',
+            outProp = skill.skillchain[1],
+            ready = ready,
+        };
+    end
+
+    local weapon = T{};
+    local spell = T{};
+    local pet = T{};
+    local display = chains.settings.display;
+
+    if display.weapon then
+        weapon:append(row(skills[3][64], true)); -- Raging Axe
+        weapon:append(row(skills[3][65], true)); -- Smash Axe
+    end
+
+    -- Ability on means the spells are listed, but not usable without the buff.
+    if display.spell then
+        local ready = not chains.settings.ability;
+        spell:append(row(skills[4][643], ready)); -- Cannonball
+        spell:append(row(skills[4][611], ready)); -- Disseverment
+    end
+
+    if display.pet then
+        pet:append(row(skills[13][544], true)); -- Punch, Ifrit
+        if not chains.settings.smn then
+            pet:append(row(skills[13][592], false)); -- Claw, Garuda
+        end
+
+        -- Horizon has no jug pet data.
+        if skills.bst then
+            pet:append(row(skills.bst[3857], true)); -- Lamb Chop, Sheep Familiar
+            if not chains.settings.bst then
+                pet:append(row(skills.bst[3840], false)); -- Foot Kick, Hare Familiar
+            end
+        end
+
+        pet:append(row(skills.pup[1942], true)); -- Arcuballista, Sharpshot
+        if not chains.settings.pup then
+            pet:append(row(skills.pup[1943], false)); -- Slapstick, Harlequin
         end
     end
-    return skillTable;
+
+    return T{ weapon = weapon, spell = spell, pet = pet };
 end
 
 --=============================================================================
--- Build a looping first-step target for Spinning Axe preview
+-- Build a looping first-step target for the settings preview
 ---@return table
 --=============================================================================
-local function CreateVisiblePreviewTarget()
+local function CreatePreviewTarget()
     local spinningAxe = skills[3][68];
     local delay = spinningAxe.delay or 3;
     return {
@@ -578,6 +774,33 @@ local function DrawCenteredText(text)
     local windowWidth = imgui.GetWindowWidth();
     imgui.SetCursorPosX(math.max((windowWidth - textWidth) * 0.5, 0));
     imgui.Text(text);
+end
+
+-- One pixel down and right. The extra copies are only the neighboring pixels,
+-- so the edge stays soft without spreading past the letter.
+local titleShadow = { 0.0, 0.0, 0.0, 0.35 };
+local titleShadowOffsets = {
+    { 1, 1 },
+    { 0, 1 }, { 2, 1 }, { 1, 0 }, { 1, 2 },
+};
+
+local function DrawTitle(text)
+    local x, y = imgui.GetCursorPos();
+    for _, off in ipairs(titleShadowOffsets) do
+        imgui.SetCursorPos({ x + off[1], y + off[2] });
+        imgui.TextColored(titleShadow, text);
+    end
+    imgui.SetCursorPos({ x, y });
+    imgui.Text(text);
+end
+
+-- Closer groups in display order, with their section titles.
+local function ChainSections(skillchains)
+    return {
+        { title = 'Weaponskills', group = skillchains.weapon },
+        { title = 'Spells', group = skillchains.spell },
+        { title = 'Pets', group = skillchains.pet },
+    };
 end
 
 --=============================================================================
@@ -635,10 +858,13 @@ local function MeasureChainWidth(targetEntry, skillchains, showChrome)
         maxWidth = math.max(maxWidth, propWidth);
     end
 
-    -- Closer lines (weaponskill/spell/pet skill + property name)
-    for _, group in pairs(skillchains) do
-        for _, v in pairs(group) do
-            consider(v.outName .. v.outText .. ' ' .. v.outProp);
+    -- Section titles and closer lines
+    for _, section in ipairs(ChainSections(skillchains)) do
+        if #section.group > 0 then
+            consider(section.title .. ' ');
+            for _, v in pairs(section.group) do
+                consider(v.outName .. v.outText .. ' ' .. v.outProp);
+            end
         end
     end
 
@@ -655,74 +881,79 @@ end
 --=============================================================================
 -- Return formatted weapon, spell, and pet skillchain options
 ---@param target table Target skillchain state
----@param actionsOverride? table Optional action list (visible preview)
 ---@return table skillchains Current options grouped by weapon, spell, and pet
 --=============================================================================
-local GetSkillchains = function(target, actionsOverride)
+local GetSkillchains = function(target)
     local weaponActions = T{};
     local spellActions = T{};
     local petActions = T{};
-    local weaponReady = true;
     local spellReady = true;
-    local currentPet = nil;
 
-    if actionsOverride then
-        weaponActions = actionsOverride;
-    else
-        local player = GetPlayer();
-        local mainJob = player.MainJob;
-        local subJob = player.SubJob;
-        local isSMN = mainJob == 'SMN' or subJob == 'SMN';
-        local requireAbility = chains.settings.ability;
-        local playerBuffs = playerTable[playerID];
-        local schBuffActive = (playerBuffs and playerBuffs[statusID.IM])
-            or chains.forceImmanence;
-        local bluBuffActive = (playerBuffs and playerBuffs[statusID.AL])
-            or (playerBuffs and playerBuffs[statusID.CA])
-            or chains.forceAffinity;
-        local enableSCH = mainJob == 'SCH' and (
-            not requireAbility
-            or schBuffActive
-        );
-        local enableBLU = mainJob == 'BLU' and (
-            not requireAbility
-            or bluBuffActive
-        );
-        weaponReady = true;
-        if mainJob == 'BLU' then
-            spellReady = not not bluBuffActive;
-        elseif mainJob == 'SCH' then
-            spellReady = not not schBuffActive;
-        end
-        currentPet = isSMN and GetCurrentPetName() or nil;
+    local player = GetPlayer();
+    local mainJob = player.MainJob;
+    local subJob = player.SubJob;
+    local isSMN = mainJob == 'SMN' or subJob == 'SMN';
+    local isBST = mainJob == 'BST' or subJob == 'BST';
+    local isPUP = mainJob == 'PUP' or subJob == 'PUP';
+    local requireAbility = chains.settings.ability;
+    local playerBuffs = playerTable[playerID];
+    local schBuffActive = (playerBuffs and playerBuffs[statusID.IM])
+        or chains.forceImmanence;
+    local bluBuffActive = (playerBuffs and playerBuffs[statusID.AL])
+        or (playerBuffs and playerBuffs[statusID.CA])
+        or chains.forceAffinity;
+    local enableSCH = mainJob == 'SCH' and (
+        not requireAbility
+        or schBuffActive
+    );
+    local enableBLU = mainJob == 'BLU' and (
+        not requireAbility
+        or bluBuffActive
+    );
+    if mainJob == 'BLU' then
+        spellReady = not not bluBuffActive;
+    elseif mainJob == 'SCH' then
+        spellReady = not not schBuffActive;
+    end
+    local currentPet = (isSMN or isBST or isPUP) and GetCurrentPetName() or nil;
+    local currentJug = isBST and FindJug(currentPet) or nil;
+    local currentFrame = isPUP and GetAutomatonFrame() or nil;
 
-        -- Create weaponskill table if it does not already exist
-        -- Will update through incoming 0xAC packets
-        if not actionTable.wepskill then
-            actionTable.wepskill = GetWeaponskills();
-        end
+    -- Create weaponskill table if it does not already exist
+    -- Will update through incoming 0xAC packets
+    if not actionTable.wepskill then
+        actionTable.wepskill = GetWeaponskills();
+    end
 
-        -- Read the BLU spell set live since the player can change it at any time
-        if enableBLU and chains.settings.display.spell then
-            actionTable.bluskill = GetBluskills();
-        end
+    -- Read the BLU spell set live since the player can change it at any time
+    if enableBLU and chains.settings.display.spell then
+        actionTable.bluskill = GetBluskills();
+    end
 
-        -- Initialize actions with weaponskills
-        if chains.settings.display.weapon then
-            weaponActions = weaponActions:extend(actionTable.wepskill);
-        end
+    -- Initialize actions with weaponskills
+    if chains.settings.display.weapon then
+        weaponActions = weaponActions:extend(actionTable.wepskill);
+    end
 
-        -- Read SMN pet skills live for main or sub SMN
-        if chains.settings.display.pet and isSMN then
-            petActions = petActions:extend(GetPetskills());
-        end
+    -- Read SMN pet skills live for main or sub SMN
+    if chains.settings.display.pet and isSMN then
+        petActions = petActions:extend(GetPetskills());
+    end
 
-        -- Spell closers
-        if chains.settings.display.spell and enableBLU and actionTable.bluskill then
-            spellActions = spellActions:extend(actionTable.bluskill);
-        elseif chains.settings.display.spell and enableSCH and actionTable.schskill then
-            spellActions = spellActions:extend(actionTable.schskill);
-        end
+    -- Beastmaster closers stay in the pet group and out of weaponActions
+    if chains.settings.display.pet and isBST then
+        petActions = petActions:extend(GetBstskills(currentJug));
+    end
+
+    if chains.settings.display.pet and isPUP then
+        petActions = petActions:extend(GetPupskills(currentFrame));
+    end
+
+    -- Spell closers
+    if chains.settings.display.spell and enableBLU and actionTable.bluskill then
+        spellActions = spellActions:extend(actionTable.bluskill);
+    elseif chains.settings.display.spell and enableSCH and actionTable.schskill then
+        spellActions = spellActions:extend(actionTable.schskill);
     end
 
     local function buildList(actions, ready)
@@ -775,10 +1006,19 @@ local GetSkillchains = function(target, actionsOverride)
     end
 
     return T{
-        weapon = buildList(weaponActions, weaponReady),
+        weapon = buildList(weaponActions, true),
         spell = buildList(spellActions, spellReady),
         pet = buildList(petActions, function (action)
-            return currentPet == action.avatar;
+            if action.avatar then
+                return currentPet == action.avatar;
+            end
+            if action.kind == 'bst' then
+                return currentJug ~= nil and currentJug[action.id] ~= nil;
+            end
+            if action.kind == 'pup' then
+                return currentPet ~= nil and currentFrame ~= nil and currentFrame[action.id] ~= nil;
+            end
+            return currentPet ~= nil;
         end),
     };
 end
@@ -859,16 +1099,15 @@ local function DrawChainContent(targetEntry, skillchains, showChrome)
         end
 
         local firstGroup = true;
-        for _, group in ipairs(T{
-            skillchains.weapon,
-            skillchains.spell,
-            skillchains.pet,
-        }) do
-            if #group > 0 then
+        for _, section in ipairs(ChainSections(skillchains)) do
+            if #section.group > 0 then
                 if not firstGroup then
-                    imgui.Separator();
+                    imgui.Spacing();
+                    imgui.Spacing();
                 end
-                drawGroup(group);
+                DrawTitle(section.title);
+                imgui.Separator();
+                drawGroup(section.group);
                 firstGroup = false;
             end
         end
@@ -882,6 +1121,7 @@ local function DrawChainContent(targetEntry, skillchains, showChrome)
             imgui.Separator();
         end
         drawClosers();
+        imgui.Spacing();
         imgui.Separator();
         drawElements();
         drawStep();
@@ -893,6 +1133,7 @@ local function DrawChainContent(targetEntry, skillchains, showChrome)
         drawStep();
         drawElements();
         imgui.Separator();
+        imgui.Spacing();
         drawClosers();
         if showChrome then
             imgui.Separator();
@@ -941,7 +1182,7 @@ local function isPetInAlliance(id)
         if pParty:GetMemberIsActive(i) == 1 then
             local playerIndex = pParty:GetMemberTargetIndex(i);
             local petIndex = pEntity:GetPetTargetIndex(playerIndex);
-            if pEntity:GetServerId(petIndex) == id then
+            if petIndex > 0 and pEntity:GetServerId(petIndex) == id then
                 return true;
             end
         end
@@ -951,13 +1192,12 @@ local function isPetInAlliance(id)
 end
 
 --=============================================================================
--- Return true if an entity is an Automaton owned by an alliance PUP.
--- Automaton weaponskills arrive as action Type 11 (same as BST pets), so owner
--- job is used to allow PUP without reopening BST jug first-steps.
+-- Return the owner's main and sub job when id is an alliance member's pet.
 ---@param id number ServerId
----@return boolean
+---@return string|nil mainJob
+---@return string|nil subJob
 --=============================================================================
-local function isAllianceAutomaton(id)
+local function alliancePetOwnerJobs(id)
     local pParty = AshitaCore:GetMemoryManager():GetParty();
     local pEntity = AshitaCore:GetMemoryManager():GetEntity();
     local pResource = AshitaCore:GetResourceManager();
@@ -966,15 +1206,71 @@ local function isAllianceAutomaton(id)
         if pParty:GetMemberIsActive(i) == 1 then
             local playerIndex = pParty:GetMemberTargetIndex(i);
             local petIndex = pEntity:GetPetTargetIndex(playerIndex);
-            if pEntity:GetServerId(petIndex) == id then
-                local mainJob = pParty:GetMemberMainJob(i);
-                local jobAbbr = pResource:GetString('jobs.names_abbr', mainJob);
-                return jobAbbr == 'PUP';
+            if petIndex > 0 and pEntity:GetServerId(petIndex) == id then
+                local mainJob = pResource:GetString('jobs.names_abbr', pParty:GetMemberMainJob(i));
+                local subJob = pResource:GetString('jobs.names_abbr', pParty:GetMemberSubJob(i));
+                return mainJob, subJob;
             end
         end
     end
 
-    return false;
+    return nil, nil;
+end
+
+--=============================================================================
+-- Return true if an entity is an Automaton owned by an alliance PUP.
+-- Automaton weaponskills arrive as action Type 11 (same as BST pets), so the
+-- owner's job is what tells them apart.
+---@param id number ServerId
+---@return boolean
+--=============================================================================
+local function isAllianceAutomaton(id)
+    return (alliancePetOwnerJobs(id)) == 'PUP';
+end
+
+--=============================================================================
+-- Return the skills.bst row for a Ready move if it came from an alliance BST.
+-- Horizon reports Ready as the player's action. Retail reports it from the pet.
+---@param actor number ServerId
+---@param skillId number
+---@return table|nil
+--=============================================================================
+local function resolveBstSkill(actor, skillId)
+    local row = skills.bst and skills.bst[skillId];
+    if not hasSkillchain(row) then
+        return nil;
+    end
+
+    local mainJob, subJob;
+    if actor == playerID then
+        local player = GetPlayer();
+        mainJob, subJob = player.MainJob, player.SubJob;
+    else
+        mainJob, subJob = alliancePetOwnerJobs(actor);
+    end
+
+    if mainJob == 'BST' or subJob == 'BST' then
+        return row;
+    end
+    return nil;
+end
+
+-- Property on this skill that closes the open window, if any.
+local function bstCloserProperty(targetEntry, skill)
+    if not targetEntry or targetEntry.closed or not skill.skillchain then
+        return nil;
+    end
+    for _, openProp in pairs(targetEntry.property) do
+        local info = chainInfo[openProp];
+        if info then
+            for _, prop in pairs(skill.skillchain) do
+                if info[prop] then
+                    return prop;
+                end
+            end
+        end
+    end
+    return nil;
 end
 
 --=============================================================================
@@ -1154,9 +1450,18 @@ ashita.events.register('packet_in', 'packet_in_cb', function (e)
 
         -- capture valid action skill and added effect property if there is a match
         local actionSkill = skills[category] and skills[category][skillId];
-        -- Type 11: NPC skills[11] and then PUP automaton skills.pup (since they are separate tables)
+        -- Type 11: a BST jug pet uses skills.bst only when that row skillchains.
+        -- Otherwise NPC skills[11], then PUP automaton skills.pup.
+        -- A server whose skills.bst rows have no properties still cannot open a window.
+        local fromBst = false;
         if not actionSkill and actionPacket.Type == 11 then
-            actionSkill = (skills[11] and skills[11][skillId]) or (skills.pup and skills.pup[skillId]);
+            local bstSkill = resolveBstSkill(actor, skillId);
+            if bstSkill then
+                actionSkill = bstSkill;
+                fromBst = true;
+            else
+                actionSkill = (skills[11] and skills[11][skillId]) or (skills.pup and skills.pup[skillId]);
+            end
         end
         -- Type 14: SAM Konzen-ittai and DNC Wild Flourish
         -- Also accept Type 6 as a defensive fallback for nonstandard JA packaging
@@ -1164,6 +1469,9 @@ ashita.events.register('packet_in', 'packet_in_cb', function (e)
             actionSkill = skills[14] and skills[14][skillId];
         end
         local effectProperty = targetAction.AdditionalEffect and SkillPropNames[bit.band(targetAction.AdditionalEffect.Damage,0x3F)];
+        if not effectProperty and fromBst then
+            effectProperty = bstCloserProperty(targetTable[target.Id], actionSkill);
+        end
 
         -- exit if actor is not in alliance
         if not (isPlayerInAlliance(actor) or isPetInAlliance(actor)) then
@@ -1195,11 +1503,12 @@ ashita.events.register('packet_in', 'packet_in_cb', function (e)
         -- Check for valid actor skill with valid message - generic first step (excluding chainbound)
         -- Include spells when SCH Immanence or BLU Azure Lore / Chain Affinity is active
         -- Immanence and Chain Affinity buff status cleared on use
-        -- Allow alliance players (including Trusts), SMN pets (Type 13), and PUP automatons (Type 11);
-        -- Still blocks BST pets (Type 11) from opening a window
-        -- BST pets do not have skillchain attributes on Horizon
-        elseif actionSkill and MessageTypes:contains(targetAction.Message)
-            and (isPlayerInAlliance(actor) or actionPacket.Type == 13 or isAllianceAutomaton(actor))
+        -- Allow alliance players (including Trusts), SMN pets (Type 13), and PUP automatons (Type 11).
+        -- A BST jug opens a window only when skills.bst has skillchain properties.
+        -- Other Type 11 pets stay refused so a move with no properties cannot start a chain.
+        elseif actionSkill and hasSkillchain(actionSkill) and MessageTypes:contains(targetAction.Message)
+            and (isPlayerInAlliance(actor) or actionPacket.Type == 13 or isAllianceAutomaton(actor)
+                or fromBst)
             and (actionPacket.Type ~= 4 or (playerTable[actor])) then
             local delay = actionSkill.delay or 3
             targetTable[target.Id] = {
@@ -1239,6 +1548,13 @@ ashita.events.register('packet_in', 'packet_in_cb', function (e)
             playerTable[actor][targetAction.Param] = os.time() + ChainBuffTypes[targetAction.Param].duration;
         end
 
+    -- PUP extended job data, sent for main or sub PUP
+    -- 0x09 frame, 0x70 automaton melee skill, 0x74 automaton ranged skill
+    elseif e.id == 0x044 and e.data:byte(0x04+1) == 18 and #e.data >= 0x78 then
+        pupPacket.frame = e.data:byte(0x09+1);
+        pupPacket.melee = struct.unpack('H', e.data, 0x70+1);
+        pupPacket.ranged = struct.unpack('H', e.data, 0x74+1);
+
     -- Action Message - Clear buff when getting '206 - ${target}'s ${status} effect wears off'.
     --  only works to clear local player
     elseif e.id == 0x29 and struct.unpack('H', e.data, 0x18+1) == 206 and struct.unpack('I', e.data, 8+1) == playerID then
@@ -1275,6 +1591,158 @@ ashita.events.register('packet_in', 'packet_in_cb', function (e)
 end);
 
 --=============================================================================
+-- Swap between top-down and bottom-up, keeping the window's anchor in place.
+--=============================================================================
+local function ToggleDirection()
+    local height = chains.lastWindowHeight or 0;
+    if chains.settings.direction == 'bottom' then
+        chains.settings.direction = 'top';
+        chains.settings.position_y = chains.settings.position_y - height;
+    else
+        chains.settings.direction = 'bottom';
+        chains.settings.position_y = chains.settings.position_y + height;
+    end
+end
+
+--=============================================================================
+-- Move the window's top left corner back to 20, 20.
+--=============================================================================
+local function ResetPosition()
+    chains.settings.position_x = 20;
+    chains.settings.position_y = 20;
+    if chains.settings.direction == 'bottom' then
+        chains.settings.position_y = 20 + chains.lastWindowHeight;
+    end
+    chains.position = { x = 20, y = 20 };
+end
+
+-- Values the settings widgets edit. imgui needs them wrapped in tables.
+local menu = {
+    open = { true },
+    scale = { 10 }, -- in tenths, so 10 is a scale of 1.0
+    x = { 0 },
+    y = { 0 },
+    dragScale = nil, -- scale shown while the slider is held, saved on release
+};
+
+--=============================================================================
+-- Open or close the settings window. The live preview shows while it's open.
+---@param open boolean
+--=============================================================================
+local function SetMenu(open)
+    if not open and menu.dragScale then
+        chains.settings.font_scale = menu.dragScale;
+        menu.dragScale = nil;
+    end
+    chains.editor = open;
+    chains.previewTarget = nil;
+end
+
+--=============================================================================
+-- Draw one checkbox bound to a boolean setting.
+---@param label string
+---@param tbl table
+---@param key string
+--=============================================================================
+local function DrawToggle(label, tbl, key)
+    local value = { tbl[key] and true or false };
+    if imgui.Checkbox(label, value) then
+        tbl[key] = value[1];
+        settings.save();
+    end
+end
+
+--=============================================================================
+-- Settings window. Same options as the chat commands.
+--=============================================================================
+local function DrawSettings()
+    if menu.dragScale and not imgui.IsMouseDown(0) then
+        chains.settings.font_scale = menu.dragScale;
+        menu.dragScale = nil;
+        settings.save();
+    end
+
+    -- Pick up changes from commands or dragging while nothing is being edited.
+    if not imgui.IsAnyItemActive() then
+        menu.scale[1] = math.floor((chains.settings.font_scale or 1.0) * 10 + 0.5);
+        menu.x[1] = math.floor(chains.settings.position_x + 0.5);
+        menu.y[1] = math.floor(chains.settings.position_y + 0.5);
+    end
+
+    menu.open[1] = true;
+    imgui.SetNextWindowPos({ chains.settings.editor_x or 20, chains.settings.editor_y or 20 }, ImGuiCond_Appearing);
+    imgui.SetNextWindowSizeConstraints({ 220, -1 }, { FLT_MAX, FLT_MAX });
+
+    local flags = bit.bor(ImGuiWindowFlags_AlwaysAutoResize, ImGuiWindowFlags_NoSavedSettings);
+    if imgui.Begin('Chains', menu.open, flags) then
+        imgui.Text('Display');
+        DrawToggle('Colors', chains.settings.display, 'color');
+        DrawToggle('Weaponskills', chains.settings.display, 'weapon');
+        DrawToggle('Spells', chains.settings.display, 'spell');
+        DrawToggle('Pets', chains.settings.display, 'pet');
+
+        imgui.Spacing();
+        if chains.settings.display.spell or chains.settings.display.pet then
+            imgui.Text('Requirements');
+            if chains.settings.display.spell then
+                DrawToggle('Ability for spells', chains.settings, 'ability');
+            end
+            if chains.settings.display.pet then
+                DrawToggle('Current avatar', chains.settings, 'smn');
+                if skills.bst then
+                    DrawToggle('Current jug pet', chains.settings, 'bst');
+                end
+                DrawToggle('Current automaton frame', chains.settings, 'pup');
+            end
+            imgui.Spacing();
+        end
+
+        imgui.Text('Window');
+        local bottomUp = { chains.settings.direction == 'bottom' };
+        if imgui.Checkbox('Layout direction', bottomUp) then
+            ToggleDirection();
+            settings.save();
+        end
+
+        -- An int slider in tenths so it can only land on 0.1 steps.
+        if imgui.SliderInt('Scale', menu.scale, 5, 30, ('%.1f'):format(menu.scale[1] / 10)) then
+            menu.dragScale = menu.scale[1] / 10;
+        end
+
+        -- Y is the top edge, or the bottom edge when laid out bottom-up.
+        local movedX = imgui.InputInt('X', menu.x);
+        local doneX = imgui.IsItemDeactivatedAfterEdit();
+        local movedY = imgui.InputInt('Y', menu.y);
+        local doneY = imgui.IsItemDeactivatedAfterEdit();
+        if movedX or movedY then
+            chains.settings.position_x = menu.x[1];
+            chains.settings.position_y = menu.y[1];
+            local top = menu.y[1];
+            if chains.settings.direction == 'bottom' then
+                top = top - chains.lastWindowHeight;
+            end
+            chains.position = { x = menu.x[1], y = top };
+        end
+        if doneX or doneY then
+            settings.save();
+        end
+
+        if imgui.Button('Reset position') then
+            ResetPosition();
+            settings.save();
+        end
+
+        chains.settings.editor_x, chains.settings.editor_y = imgui.GetWindowPos();
+    end
+    imgui.End();
+
+    if not menu.open[1] then
+        SetMenu(false);
+        settings.save();
+    end
+end
+
+--=============================================================================
 -- event: d3d_present
 -- desc: Event called when the Direct3D device is presenting a scene.
 --=============================================================================
@@ -1306,18 +1774,16 @@ ashita.events.register('d3d_present', 'present_cb', function ()
     local targetId = AshitaCore:GetMemoryManager():GetTarget():GetServerId(0);
     local render = targetId ~= nil and targetTable[targetId] and targetTable[targetId].dur-(now-targetTable[targetId].ts) > 0;
 
-    -- Keep visible-mode preview looping while enabled
-    if chains.visible then
+    -- Loop the preview while the settings window is open
+    if chains.editor then
         if not chains.previewTarget then
-            chains.previewTarget = CreateVisiblePreviewTarget();
+            chains.previewTarget = CreatePreviewTarget();
         elseif now - chains.previewTarget.ts > chains.previewTarget.dur then
             chains.previewTarget.ts = now;
         end
-    else
-        chains.previewTarget = nil;
     end
 
-    if render or chains.visible or chains.position then
+    if render or chains.editor or chains.position then
         local showChrome = false;
         local targetEntry = nil;
         local skillchains = nil;
@@ -1327,19 +1793,23 @@ ashita.events.register('d3d_present', 'present_cb', function ()
             skillchains = targetEntry.closed
                 and T{ weapon = T{}, spell = T{}, pet = T{} }
                 or GetSkillchains(targetEntry);
-        elseif chains.visible and chains.previewTarget then
+        elseif chains.previewTarget then
             showChrome = true;
             targetEntry = chains.previewTarget;
-            skillchains = GetSkillchains(targetEntry, GetAxePreviewSkills());
+            skillchains = GetPreviewSkillchains();
         end
 
         -- Window flags (no title bar, no resize handle, auto-fit height)
+        -- Locked in place unless the settings window is open.
         local flags = bit.bor(
             ImGuiWindowFlags_NoDecoration,
             ImGuiWindowFlags_AlwaysAutoResize,
             ImGuiWindowFlags_NoSavedSettings,
             ImGuiWindowFlags_NoFocusOnAppearing,
             ImGuiWindowFlags_NoNav)
+        if not chains.editor then
+            flags = bit.bor(flags, ImGuiWindowFlags_NoMove);
+        end
 
         -- Bottom-up: position_y stores the bottom edge; top-down: the top edge
         local bottomUp = chains.settings.direction == 'bottom';
@@ -1359,7 +1829,7 @@ ashita.events.register('d3d_present', 'present_cb', function ()
 
         -- Scale font and measure content width for auto-fit
         if targetEntry then
-            ApplyFontScale(chains.settings.font_scale);
+            ApplyFontScale(menu.dragScale or chains.settings.font_scale);
             local contentWidth = MeasureChainWidth(targetEntry, skillchains, showChrome);
             imgui.SetNextWindowSizeConstraints({ contentWidth, -1 }, { FLT_MAX, FLT_MAX });
         else
@@ -1403,6 +1873,10 @@ ashita.events.register('d3d_present', 'present_cb', function ()
         end
     end
 
+    if chains.editor then
+        DrawSettings();
+    end
+
 end);
 
 --=============================================================================
@@ -1427,22 +1901,36 @@ ashita.events.register('command', 'command_cb', function (e)
     e.blocked = true;
 
     --========================================================================
+    -- Settings window and live preview
+    --========================================================================
+    if (#args == 1) then
+        SetMenu(not chains.editor);
+        local state = chains.editor and chat.success('Enabled') or chat.error('Disabled');
+        print(chat.header(addon.name):append(chat.message('Chains settings menu is now: ')):append(state));
+        return;
+    end
+
+    --========================================================================
     -- Help
     --========================================================================
     if (#args == 2) and args[2]:any('help', '?', 'commands') then
         local commandHelp = T{
+            { '/chains', 'Open the settings window and the live preview.' },
             { '/chains color', 'Toggle colored skillchain properties.' },
             { '/chains weapon', 'Toggle weaponskill display.' },
             { '/chains pet', 'Toggle pet skill display.' },
             { '/chains spell', 'Toggle spell display.' },
             { '/chains ability', 'Toggle ability requirement for spell skill display.' },
             { '/chains smn', 'Toggles requirement for avatar to be summoned for pet skill display.' },
-            { '/chains visible', 'Show live preview and unlock the window for moving.' },
+            { '/chains pup', 'Toggles requirement for the current automaton frame.' },
             { '/chains direction', 'Toggle top-down or bottom-up layout direction.' },
             { '/chains scale <n>', 'Set UI font and window scale.' },
             { '/chains move <x> <y>', 'Set window position.' },
-            { '/chains reset', 'Reset window position and direction.' },
+            { '/chains reset', 'Reset window position.' },
         };
+        if skills.bst then
+            commandHelp:insert(8, { '/chains bst', 'Toggles requirement for the current jug pet.' });
+        end
         commandHelp:ieach(function(entry)
             print(chat.header(addon.name)
                 :append(chat.success(entry[1]))
@@ -1467,69 +1955,50 @@ ashita.events.register('command', 'command_cb', function (e)
         print(chat.header(addon.name):append(chat.message(messages[args[2]])):append(state));
     end
 
-    if (#args == 2) and (args[2] == 'ability') then
-        chains.settings.ability = not chains.settings.ability;
-        local state = chains.settings.ability and chat.success('Enabled') or chat.error('Disabled');
-        print(chat.header(addon.name):append(chat.message('Chains ability requirement is now: ')):append(state));
-    end
-
-    if (#args == 2) and (args[2] == 'smn') then
-        chains.settings.smn = not chains.settings.smn;
-        local state = chains.settings.smn and chat.success('Enabled') or chat.error('Disabled');
-        print(chat.header(addon.name):append(chat.message('Chains avatar summon requirement has been: ')):append(state));
+    local requirements = T{
+        ability = 'Chains ability requirement is now: ',
+        smn = 'Chains avatar summon requirement has been: ',
+        bst = 'Chains jug pet requirement has been: ',
+        pup = 'Chains automaton frame requirement has been: ',
+    };
+    if (#args == 2) and requirements:containskey(args[2]) then
+        chains.settings[args[2]] = not chains.settings[args[2]];
+        local state = chains.settings[args[2]] and chat.success('Enabled') or chat.error('Disabled');
+        print(chat.header(addon.name):append(chat.message(requirements[args[2]])):append(state));
     end
 
     --========================================================================
     -- Window management
     --========================================================================
-    if (#args == 2) and (args[2] == 'visible') then
-        chains.visible = not chains.visible;
-        if chains.visible then
-            chains.previewTarget = CreateVisiblePreviewTarget();
-        else
-            chains.previewTarget = nil;
-        end
-        local state = chains.visible and chat.success('Enabled') or chat.error('Disabled');
-        print(chat.header(addon.name):append(chat.message('Chains live preview is now: ')):append(state));
-    end
-
     if (#args == 2) and (args[2] == 'direction') then
-        local height = chains.lastWindowHeight or 0;
-        if chains.settings.direction == 'bottom' then
-            -- Convert stored bottom edge back to top edge
-            chains.settings.direction = 'top';
-            chains.settings.position_y = chains.settings.position_y - height;
-        else
-            -- Convert stored top edge to bottom edge
-            chains.settings.direction = 'bottom';
-            chains.settings.position_y = chains.settings.position_y + height;
-        end
+        ToggleDirection();
         local direction = chains.settings.direction == 'bottom' and 'Bottom-Up' or 'Top-Down';
         print(chat.header(addon.name):append(chat.message('Chains direction has been set to: ')):append(chat.success(direction)));
     end
 
     if (#args == 3) and (args[2] == 'scale') then
-        chains.settings.font_scale = args[3]:number();
-        print(chat.header(addon.name):append(chat.message('Chains font scale has been set to: ')):append(chat.success(tostring(chains.settings.font_scale))));
+        local scale = tonumber(args[3]);
+        if not scale or scale <= 0 then
+            print(chat.header(addon.name):append(chat.error('Usage: /chains scale <n>, e.g. /chains scale 1.2')));
+            return;
+        end
+        chains.settings.font_scale = scale;
+        print(chat.header(addon.name):append(chat.message('Chains font scale has been set to: ')):append(chat.success(tostring(scale))));
     end
 
     if (#args == 4) and (args[2] == 'move') then
-        chains.position = {
-            x = args[3]:number(),
-            y = args[4]:number(),
-        };
-        print(chat.header(addon.name):append(chat.message('Chains window has been moved to: ')):append(chat.success(('%s, %s'):fmt(chains.position.x, chains.position.y))));
+        local x, y = tonumber(args[3]), tonumber(args[4]);
+        if not x or not y then
+            print(chat.header(addon.name):append(chat.error('Usage: /chains move <x> <y>')));
+            return;
+        end
+        chains.position = { x = x, y = y };
+        print(chat.header(addon.name):append(chat.message('Chains window has been moved to: ')):append(chat.success(('%s, %s'):fmt(x, y))));
     end
 
     if (#args == 2) and (args[2] == 'reset') then
-        chains.settings.direction = 'top';
-        chains.settings.position_x = 20;
-        chains.settings.position_y = 20;
-        chains.position = {
-            x = 20,
-            y = 20,
-        };
-        print(chat.header(addon.name):append(chat.message('Chains has been reset and moved to: ')):append(chat.success('20, 20 Top-Down')));
+        ResetPosition();
+        print(chat.header(addon.name):append(chat.message('Chains window position has been reset.')));
     end
 
 end);

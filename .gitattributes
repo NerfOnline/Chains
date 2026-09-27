@@ -1,0 +1,4 @@
+*.sh text eol=lf
+chains/skills.lua text eol=lf
+chains/pets.lua text eol=lf
+scripts/*.lua text eol=lf
