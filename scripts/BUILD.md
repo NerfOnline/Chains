@@ -13,7 +13,7 @@ The script asks for two things first:
 1. Version, such as `0.92c`.
 2. `Release` or `Pre-release`.
 
-It writes the version into `addon.version` in `chains/chains.lua`, such as `0.92c` for a Release or `0.92c-Pre-release` for a Pre-release. It does not read the old version from the file, and it does not commit the change.
+It writes the version into `addon.version` in `chains/chains.lua`, such as `0.92c` for a Release or `0.92c-Pre-release` for a Pre-release. It does not read the old version from the file. The change is only committed if you confirm the release.
 
 It then builds three zips in `dist/`. Each zip contains only `chains/chains.lua`, `chains/skills.lua`, and `chains/pets.lua`. All three share the same `chains.lua` and `pets.lua`. Each `skills.lua` is rendered from that server's data file.
 
@@ -25,7 +25,7 @@ For version `0.92c` and Pre-release the files are:
 
 Retail omits the server name. Horizon and Phoenix are added after the version. A Release leaves out `-Pre-release`, so the Retail zip is `dist/Chains-v0.92c.zip`.
 
-After the zips exist, the script asks for the GitHub release title. The tag is the version with a `v` in front, such as `v0.92c` or `v0.92c-Pre-release`. The release message is every commit message since the latest release or pre-release tag. It prints those values and the three zip paths, then asks you to confirm before submitting. Answering anything other than `y` leaves the zips in `dist/` and does not create a release. A Pre-release is posted as a GitHub pre-release.
+After the zips exist, the script asks for the GitHub release title. The tag is the version with a `v` in front, such as `v0.92c` or `v0.92c-Pre-release`. The release message is every commit message since the latest release or pre-release tag. It prints those values and the three zip paths, then asks you to confirm before submitting. Answering `y` commits only `chains/chains.lua` as `Version bump to 0.92c`, pushes the current branch, and creates the release tagged on that commit. Answering anything other than `y` leaves the zips in `dist/` and does not commit, push, or create a release. A Pre-release is posted as a GitHub pre-release.
 
 `dist/` is gitignored. The skillchain database is split by server:
 

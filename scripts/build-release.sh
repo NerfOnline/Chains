@@ -371,11 +371,19 @@ main() {
         echo "The gh command is required to submit the GitHub release. The zips are in dist/." >&2
         exit 1
     fi
+
+    # The release is tagged on this commit, so it has to be pushed first.
+    if ! git diff --quiet -- chains/chains.lua; then
+        git commit --quiet -m "Version bump to ${label}" -- chains/chains.lua
+        echo "Committed version bump to ${label}"
+    fi
+    git push origin HEAD
+
     local -a release_flags=()
     if [[ "$channel" == "Pre-release" ]]; then
         release_flags+=("--prerelease")
     fi
-    gh release create "$tag" "${zips[@]}" --title "$title" --notes "$message" ${release_flags[@]+"${release_flags[@]}"}
+    gh release create "$tag" "${zips[@]}" --target "$(git rev-parse HEAD)" --title "$title" --notes "$message" ${release_flags[@]+"${release_flags[@]}"}
     echo "GitHub release submitted."
 }
 
