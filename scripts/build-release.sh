@@ -284,7 +284,10 @@ main() {
         fi
     done
 
-    label="${version}-${channel}"
+    label="$version"
+    if [[ "$channel" == "Pre-release" ]]; then
+        label="${version}-Pre-release"
+    fi
     base="Chains-v${label}"
 
     if ! grep -q "addon\.version" chains/chains.lua; then
@@ -332,15 +335,29 @@ main() {
         echo "  ${zip}"
     done
 
-    local title tag message submit
+    local title tag last_tag message submit
+    tag="v${label}"
     title=$(read_required "GitHub release title: ")
-    tag=$(read_required "GitHub release tag: ")
-    message=$(read_required "GitHub release message: ")
+
+    # The notes are every commit message since the last release or pre-release tag.
+    git fetch --tags --quiet origin 2>/dev/null || true
+    last_tag=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)
+    if [[ -n "$last_tag" ]]; then
+        message=$(git log --format='%B' "${last_tag}..HEAD")
+    else
+        message=$(git log --format='%B')
+    fi
+    if [[ -z "${message//[[:space:]]/}" ]]; then
+        echo "There are no commits since ${last_tag}." >&2
+        exit 1
+    fi
 
     echo
     echo "Title: ${title}"
     echo "Tag: ${tag}"
-    echo "Message: ${message}"
+    echo "Commits since: ${last_tag:-the first commit}"
+    echo "Message:"
+    echo "$message"
     echo "Files:"
     for zip in "${zips[@]}"; do
         echo "  ${zip}"
