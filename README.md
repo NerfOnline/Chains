@@ -5,6 +5,8 @@ Displays a text object containing skillchain elements resonating on current targ
 
 Chains is based on the skillchains addon by Ivaar for Ashita-v3. It has mostly been recoded for Ashita-v4 while maintaining the same functionality by Sippius, with further optimization by NerfOnline.
 
+<img width="560" height="407" alt="xiloader_RTr3HyVHtj" src="https://github.com/user-attachments/assets/b89691b4-4681-4a4b-941b-fb3a04546637" />
+
 ### Commands
 The following commands may be used:
 
