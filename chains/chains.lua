@@ -1921,7 +1921,7 @@ ashita.events.register('command', 'command_cb', function (e)
             { '/chains pet', 'Toggle pet skill display.' },
             { '/chains spell', 'Toggle spell display.' },
             { '/chains ability', 'Toggle ability requirement for spell skill display.' },
-            { '/chains smn', 'Toggles requirement for avatar to be summoned for pet skill display.' },
+            { '/chains smn', 'Toggles requirement for the current avatar.' },
             { '/chains pup', 'Toggles requirement for the current automaton frame.' },
             { '/chains direction', 'Toggle top-down or bottom-up layout direction.' },
             { '/chains scale <n>', 'Set UI font and window scale.' },
