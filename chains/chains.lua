@@ -21,7 +21,7 @@
 
 addon.name     = 'chains';
 addon.author   = 'Sippius, Ivaar, and NerfOnline';
-addon.version  = '0.85d-Pre-release';
+addon.version  = '0.86';
 addon.desc     = 'Display current skillchain options.';
 
 require('common');
