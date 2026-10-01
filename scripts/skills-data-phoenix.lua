@@ -222,7 +222,8 @@ sets.phoenix[3] = {
 sets.phoenix[13] = {
 --Carbuncle
     [513] = {en='Poison Nails',skillchain={'Transfixion'},avatar='Carbuncle',level=5},
-    [521] = {en='Regal Scratch',skillchain={'Scission'},avatar='Carbuncle',level=1},
+--Cait Sith
+    [521] = {en='Regal Scratch',skillchain={'Scission'},avatar='Cait Sith',level=1},
 --Fenrir
     [528] = {en='Moonlit Charge',skillchain={'Compression'},avatar='Fenrir',level=5},
     [529] = {en='Crescent Fang',skillchain={'Transfixion'},avatar='Fenrir',level=10},
@@ -253,9 +254,9 @@ sets.phoenix[13] = {
 
 sets.phoenix[14] = {
 --Samurai
-    [320] = {en='Konzen-ittai',skillchain={'Light','Darkness','Gravitation','Fragmentation','Distortion','Compression','Liquefaction','Induration','Reverberation','Scission'}},
+    [320] = {en='Konzen-ittai',skillchain={'Light','Darkness','Gravitation','Fragmentation','Distortion','Fusion','Liquefaction','Induration','Reverberation','Impaction','Compression'}},
 --Dancer
-    [209] = {en='Wild Flourish',skillchain={'Compression','Liquefaction','Induration','Reverberation','Scission'}},
+    [209] = {en='Wild Flourish',skillchain={'Liquefaction','Induration','Reverberation','Impaction','Compression'}},
 }
 
 sets.phoenix.immanence = {
@@ -374,16 +375,16 @@ sets.phoenix[4] = {
 }
 
 sets.phoenix.pup = {
-    [1940] = {en='Chimera Ripper',skillchain={'Induration','Detonation'}},
-    [1941] = {en='String Clipper',skillchain={'Scission','Impaction'}},
+    [1940] = {en='Chimera Ripper',skillchain={'Detonation','Induration'}},
+    [1941] = {en='String Clipper',skillchain={'Scission'}},
     [1942] = {en='Arcuballista',skillchain={'Liquefaction','Transfixion'}},
     [1943] = {en='Slapstick',skillchain={'Reverberation','Impaction'}},
     [2065] = {en='Cannibal Blade',skillchain={'Compression','Reverberation'}},
-    [2066] = {en='Daze',skillchain={'Transfixion'}},
+    [2066] = {en='Daze',skillchain={'Impaction','Transfixion'}},
     [2067] = {en='Knockout',skillchain={'Scission','Detonation'}},
     [2299] = {en='Bone Crusher',skillchain={'Fragmentation'}},
     [2300] = {en='Armor Piercer',skillchain={'Gravitation'}},
-    [2301] = {en='Magic Mortar',skillchain={'Fusion'}},
+    [2301] = {en='Magic Mortar',skillchain={'Fusion','Liquefaction'}},
     [2743] = {en='String Shredder',skillchain={'Distortion','Scission'}},
     [2744] = {en='Armor Shatterer',skillchain={'Fusion','Impaction'}},
 }
