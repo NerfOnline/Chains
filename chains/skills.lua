@@ -338,7 +338,7 @@ skills[4] = {
     [667] = {en='Vanity Dive',skillchain={'Transfixion','Scission'}},
     [669] = {en='Whirl of Rage',skillchain={'Scission','Detonation'}},
     [670] = {en='Benthic Typhoon',skillchain={'Gravitation','Transfixion'}},
-    [673] = {en='Quad. Continuum',skillchain={'Distortion','Scission'}},
+    [673] = {en='Quad. Continuum',skillchain={'Reverberation','Scission'}},
     [677] = {en='Empty Thrash',skillchain={'Compression','Scission'}},
     [682] = {en='Delta Thrust',skillchain={'Liquefaction','Detonation'}},
     [688] = {en='Heavy Strike',skillchain={'Fragmentation','Transfixion'}},
